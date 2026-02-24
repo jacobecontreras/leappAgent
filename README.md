@@ -12,7 +12,7 @@ The system utilizes a RAG (Retrieval-Augmented Generation) architecture combined
 
 All data processing, vector storage, and report viewing is fully **local**.
 
-The only external data transmission is strictly for LLM reasoning. This is handled via **Open Router** using a "Bring Your Own Key" (BYOK) model, ensuring the user retains control over the API connection.
+The only external data transmission is strictly for LLM reasoning. This is handled via **Open Router** using a "Bring Your Own Key" (BYOK) model, ensuring the user retains control over the API connection. While this is less than ideal, I plan to transition to a strictly local LLM.
 
 ## Features
 
