@@ -1,5 +1,5 @@
 from tools.ollama_schemas import get_ollama_tools, to_ollama_tool, TOOL_DESCRIPTIONS
-from tools.validation_schemas import TOOL_SCHEMAS, ArtifactDataSchema
+from tools.validation_schemas import TOOL_SCHEMAS, QueryArtifactsSchema, SemanticSearchSchema
 
 
 def _find_titles(node):
@@ -29,11 +29,10 @@ def test_tool_shape_and_description():
 
 
 def test_required_fields():
-    tool = to_ollama_tool("viewArtifactData", ArtifactDataSchema)
+    tool = to_ollama_tool("queryArtifacts", QueryArtifactsSchema)
     required = tool["function"]["parameters"]["required"]
     assert "job_name" in required
-    assert "artifact_type_id" in required
-    assert "limit" not in required
+    assert "sql" in required
 
 
 def test_no_title_keys():
@@ -41,10 +40,10 @@ def test_no_title_keys():
         assert list(_find_titles(tool["function"]["parameters"])) == []
 
 
-def test_union_becomes_anyof():
-    tool = to_ollama_tool("viewArtifactData", ArtifactDataSchema)
-    artifact_type_id = tool["function"]["parameters"]["properties"]["artifact_type_id"]
-    assert "anyOf" in artifact_type_id
-    types = {option.get("type") for option in artifact_type_id["anyOf"]}
-    assert "integer" in types
-    assert "array" in types
+def test_optional_becomes_anyof():
+    tool = to_ollama_tool("semanticSearch", SemanticSearchSchema)
+    job_name = tool["function"]["parameters"]["properties"]["job_name"]
+    assert "anyOf" in job_name
+    types = {option.get("type") for option in job_name["anyOf"]}
+    assert "string" in types
+    assert "null" in types

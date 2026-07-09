@@ -5,7 +5,7 @@ from logs.audit import audit_logger
 
 def test_jsonl_records(tmp_audit_dir):
     audit_logger.log("session-a", "test-model", "user_message", {"message": "hello"})
-    audit_logger.log("session-a", "test-model", "tool_call", {"iteration": 1, "name": "grepSearch", "arguments": {"pattern": "x"}})
+    audit_logger.log("session-a", "test-model", "tool_call", {"iteration": 1, "name": "searchArtifacts", "arguments": {"pattern": "x"}})
 
     audit_file = tmp_audit_dir / "audit_session-a.jsonl"
     assert audit_file.exists()
@@ -19,7 +19,7 @@ def test_jsonl_records(tmp_audit_dir):
         assert record["chat_model"] == "test-model"
 
     assert records[0]["event"] == "user_message"
-    assert records[1]["data"]["name"] == "grepSearch"
+    assert records[1]["data"]["name"] == "searchArtifacts"
 
 
 def test_per_session_files(tmp_audit_dir):

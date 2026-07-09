@@ -5,19 +5,21 @@ from pydantic import ValidationError
 from .shared_utils import build_error_response
 from .semantic_search import semantic_search
 from .artifact_list import artifact_list
-from .artifact_data import artifact_data
+from .describe_artifact import describe_artifact
+from .query_artifacts import query_artifacts
+from .search_artifacts import search_artifacts
 from .report_list import report_list
-from .grep_search import grep_search
 
 logger = logging.getLogger(__name__)
 
 # Direct tool mapping - simple for desktop app
 TOOLS = {
-    "semanticSearch": semantic_search,
-    "viewArtifactList": artifact_list,
-    "viewArtifactData": artifact_data,
     "viewReportList": report_list,
-    "grepSearch": grep_search
+    "viewArtifactList": artifact_list,
+    "describeArtifact": describe_artifact,
+    "queryArtifacts": query_artifacts,
+    "searchArtifacts": search_artifacts,
+    "semanticSearch": semantic_search
 }
 
 # Simple schema mapping

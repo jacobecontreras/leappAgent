@@ -50,28 +50,9 @@ class ChromaService:
 
             collection = self._get_collection()
 
-            # Prepare documents and metadata
-            documents = []
-            metadatas = []
-            ids = []
-
-            for chunk in chunks_data:
-                # Use the JSON data as document
-                document = chunk['data_json']
-                documents.append(document)
-
-                # Prepare metadata
-                metadata = {
-                    'job_name': chunk['job_name'],
-                    'artifact_type_id': chunk['artifact_type_id'],
-                    'row_index': chunk['row_index'],
-                    'file_name': chunk.get('file_name', 'unknown')
-                }
-                metadatas.append(metadata)
-
-                # Create unique ID
-                chunk_id = f"{job_name}_{chunk['artifact_type_id']}_{chunk['row_index']}"
-                ids.append(chunk_id)
+            documents = [chunk['document'] for chunk in chunks_data]
+            metadatas = [chunk['metadata'] for chunk in chunks_data]
+            ids = [chunk['id'] for chunk in chunks_data]
 
             # Add to collection in batches to avoid memory issues
             for i in range(0, len(documents), BATCH_SIZE):

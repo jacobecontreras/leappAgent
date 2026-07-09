@@ -74,7 +74,7 @@ async def health():
 @app.post("/api/upload")
 async def upload_report(request: UploadRequest):
     if not validate_leapp_directory(request.directory_path):
-        raise HTTPException(status_code=400, detail="Invalid LEAPP report directory: No TSV or Timeline directory found")
+        raise HTTPException(status_code=400, detail="Invalid LEAPP report directory: _lava_artifacts.db / _lava_data.lava not found (requires iLEAPP v2.x or aLEAPP v3.4+ output)")
 
     job_name = f"report_{int(time.time())}"
     insert_report_metadata(job_name, request.directory_path)

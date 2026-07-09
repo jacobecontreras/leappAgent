@@ -1,5 +1,7 @@
 import os
 import sys
+import json
+import sqlite3
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -24,6 +26,75 @@ def tmp_audit_dir(tmp_path, monkeypatch):
     from logs import audit
     monkeypatch.setattr(audit.audit_logger, "audit_dir", str(audit_dir))
     return audit_dir
+
+
+def make_lava_report(tmp_path, call_count=3, long_message=False, complete=True):
+    """Build a minimal LAVA-format report: _lava_artifacts.db + _lava_data.lava"""
+    conn = sqlite3.connect(tmp_path / "_lava_artifacts.db")
+    conn.execute("CREATE TABLE callhistory (starting_timestamp INTEGER, phone_number TEXT, call_direction TEXT)")
+    conn.executemany(
+        "INSERT INTO callhistory VALUES (?, ?, ?)",
+        [(1584993772 + i, "+14082560700" if i % 2 == 0 else "+17042751134", "Incoming") for i in range(call_count)]
+    )
+
+    conn.execute("CREATE TABLE whatsappmessages (timestamp INTEGER, sender_name TEXT, message TEXT)")
+    message_rows = [
+        (1585000000, "Alice", "Meet me at the pier at noon"),
+        (1585000060, "Bob", ""),
+        (1585000120, "Carol", "Wire the money to the usual account"),
+    ]
+    if long_message:
+        message_rows.append((1585000180, "Dave", "x" * 600))
+    conn.executemany("INSERT INTO whatsappmessages VALUES (?, ?, ?)", message_rows)
+    conn.commit()
+    conn.close()
+
+    manifest = {
+        "processing_status": "Complete" if complete else "In Progress",
+        "lava_db_name": "_lava_artifacts.db",
+        "parser_info": {"leapp_version": "2.3.0"},
+        "artifacts": {
+            "Call History": [{
+                "name": "Call History",
+                "tablename": "callhistory",
+                "column_map": {
+                    "starting_timestamp": "Starting Timestamp",
+                    "phone_number": "Phone Number",
+                    "call_direction": "Call Direction"
+                },
+                "object_columns": [
+                    {"name": "starting_timestamp", "type": "datetime"},
+                    {"name": "phone_number", "type": "phonenumber"}
+                ],
+                "record_count": call_count,
+                "source_path": "/evidence/CallHistory.storedata"
+            }],
+            "WhatsApp": [{
+                "name": "WhatsApp - Messages",
+                "tablename": "whatsappmessages",
+                "column_map": {
+                    "timestamp": "Timestamp",
+                    "sender_name": "Sender Name",
+                    "message": "Message"
+                },
+                "object_columns": [{"name": "timestamp", "type": "datetime"}],
+                "record_count": len(message_rows),
+                "source_path": "/evidence/ChatStorage.sqlite"
+            }]
+        },
+        "meta": {
+            "modules": [{
+                "module_name": "callHistory",
+                "artifacts": [{
+                    "tablename": "callhistory",
+                    "name": "Call History",
+                    "description": "Call logs from CallHistory.storedata"
+                }]
+            }]
+        }
+    }
+    (tmp_path / "_lava_data.lava").write_text(json.dumps(manifest))
+    return tmp_path
 
 
 class FakeOllamaClient:

@@ -1,6 +1,6 @@
 import logging
 from pydantic import BaseModel, Field
-from typing import Optional, List, Union, Dict, Any
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -16,22 +16,26 @@ class ArtifactListSchema(BaseModel):
     model_config = {"extra": "forbid"}
 
 
-class ArtifactDataSchema(BaseModel):
-    """Schema for viewArtifactData"""
+class DescribeArtifactSchema(BaseModel):
+    """Schema for describeArtifact"""
     job_name: str = Field(..., min_length=1)
-    artifact_type_id: Union[int, List[int]] = Field(...)
-    limit: int = Field(default=100, gt=0)
-    offset: int = Field(default=0, ge=0)
+    tablename: str = Field(..., min_length=1)
     model_config = {"extra": "forbid"}
 
 
-class GrepSearchSchema(BaseModel):
-    """Schema for grepSearch"""
-    pattern: str = Field(..., min_length=1)
+class QueryArtifactsSchema(BaseModel):
+    """Schema for queryArtifacts"""
     job_name: str = Field(..., min_length=1)
-    artifact_type_id: Optional[Union[int, List[int]]] = Field(default=None)
-    limit: int = Field(default=50, gt=0)
+    sql: str = Field(..., min_length=1)
+    model_config = {"extra": "forbid"}
+
+
+class SearchArtifactsSchema(BaseModel):
+    """Schema for searchArtifacts"""
+    job_name: str = Field(..., min_length=1)
+    pattern: str = Field(..., min_length=1)
     case_sensitive: bool = Field(default=False)
+    limit: int = Field(default=50, gt=0, le=200)
     model_config = {"extra": "forbid"}
 
 
@@ -47,7 +51,8 @@ class SemanticSearchSchema(BaseModel):
 TOOL_SCHEMAS = {
     "viewReportList": ReportListSchema,
     "viewArtifactList": ArtifactListSchema,
-    "viewArtifactData": ArtifactDataSchema,
-    "grepSearch": GrepSearchSchema,
+    "describeArtifact": DescribeArtifactSchema,
+    "queryArtifacts": QueryArtifactsSchema,
+    "searchArtifacts": SearchArtifactsSchema,
     "semanticSearch": SemanticSearchSchema,
 }
