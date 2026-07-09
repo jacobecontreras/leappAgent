@@ -9,14 +9,20 @@ const AIService = {
         return sessionId;
     },
 
-    sendMessage(message, onToken, onComplete, onError) {
+    async getHealth() {
+        const response = await fetch('/api/health');
+        if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+        return await response.json();
+    },
+
+    sendMessage(message, onEvent, onComplete, onError) {
         let aborted = false;
         const controller = new AbortController();
         const sessionId = this.getSessionId();
 
         const promise = (async () => {
             try {
-                const response = await fetch('http://localhost:8000/chat', {
+                const response = await fetch('/api/chat', {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
@@ -56,18 +62,17 @@ const AIService = {
                             try {
                                 const parsed = JSON.parse(data);
 
-                                if (parsed.error) {
-                                    if (onError) onError(parsed.error);
+                                if (parsed.type === 'error') {
+                                    if (onError) onError(parsed.message);
                                     return;
                                 }
 
-                                // Handle structured response format
-                                if (parsed.type && onToken) {
-                                    onToken(parsed);
+                                if (parsed.type && onEvent) {
+                                    onEvent(parsed);
                                 }
 
                                 if (parsed.done && onComplete) {
-                                    onComplete(parsed.full_response);
+                                    onComplete();
                                 }
                             } catch (e) {
                                 // Skip invalid JSON silently

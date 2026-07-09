@@ -4,191 +4,99 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>aiLEAPP</title>
+    <title>LEAPP Agent</title>
     <link rel="stylesheet" href="styles.css">
 </head>
 
 <body>
     <div class="app-container">
-        <!-- Sidebar -->
-        <nav class="sidebar" id="sidebar">
-            <div class="sidebar-logo">
-                <img src="assets/logo.png" alt="Logo" class="sidebar-logo-img">
-            </div>
-            <div class="sidebar-content">
-                <a href="#" class="nav-link active" data-page="agent-chat">
-                    <img src="assets/agent-chat-icon.svg" alt="Agent Chat" class="nav-icon">
-                    <span class="nav-text">Agent Chat</span>
-                </a>
-                <a href="#" class="nav-link" data-page="kml-viewer">
-                    <img src="assets/kml-viewer-icon.svg" alt="KML Viewer" class="nav-icon">
-                    <span class="nav-text">KML Viewer</span>
-                </a>
-                <a href="#" class="nav-link" data-page="settings">
-                    <img src="assets/settings-icon.svg" alt="Settings" class="nav-icon">
-                    <span class="nav-text">Settings</span>
-                </a>
-            </div>
-        </nav>
+        <header class="app-header">
+            <img src="assets/logo.png" alt="LEAPP Agent" class="header-logo">
+            <button id="settingsButton" class="icon-button" title="Settings">
+                <img src="assets/settings-icon.svg" alt="Settings" class="icon-img">
+            </button>
+        </header>
 
-        <!-- Main Content Area -->
-        <main class="main-content">
-            <!-- Agent Chat Page -->
-            <div id="agent-chat-page" class="page-content active">
-                <header class="app-header" id="chatHeader">
-                </header>
+        <div id="healthBanner" class="health-banner hidden">
+            <span id="healthBannerText">Ollama is not reachable. Install Ollama and pull a model to get started.</span>
+            <button id="healthRetryBtn" class="banner-retry-btn">Retry</button>
+        </div>
 
-                <main class="chat-content" id="chatContent">
-                    <div class="chat-messages" id="chatMessages">
-                        <div class="chat-welcome" id="chatWelcome">
-                            <img src="assets/logo.png" alt="aLEAPP" class="chat-welcome-logo">
-                        </div>
-                    </div>
-
-                    <div class="chat-input">
-                        <textarea id="messageInput" placeholder="Type your message..." rows="1"></textarea>
-                        <div class="input-actions">
-                            <button id="uploadButton" class="upload-button" title="Upload report">
-                                <img src="assets/attachment.svg" alt="Upload" class="upload-icon">
-                                <span>Upload report</span>
-                            </button>
-                            <button id="sendButton" class="send-button">
-                                <img src="assets/send-arrow.svg" alt="Send" class="send-icon">
-                                <img src="assets/stop-icon.svg" alt="Stop" class="stop-icon">
-                            </button>
-                        </div>
-                    </div>
-                </main>
-            </div>
-
-            <!-- KML Viewer Page -->
-            <div id="kml-viewer-page" class="page-content">
-                <!-- Search bar -->
-                <div class="search-container">
-                    <input type="text" id="searchInput" placeholder="Search for a location..." class="search-input">
-                    <button id="searchBtn" class="search-btn btn-icon">
-                        <img src="assets/search-icon.svg" alt="Search" class="btn-icon-img">
-                    </button>
+        <main class="chat-content">
+            <div class="chat-messages" id="chatMessages">
+                <div class="chat-welcome" id="chatWelcome">
+                    <img src="assets/logo.png" alt="LEAPP Agent" class="chat-welcome-logo">
                 </div>
-
-                <!-- Full-page map -->
-                <div id="map" class="map-fullscreen"></div>
-
-                <!-- Floating upload button -->
-                <div class="floating-upload-container">
-                    <button id="floatingUploadBtn" class="floating-upload-btn btn-icon" title="Upload KML files">
-                        <img src="assets/upload-icon.svg" alt="Upload" class="btn-icon-img">
-                    </button>
-                </div>
-
-                <!-- Hidden file input -->
-                <input type="file" id="kmlFileInput" accept=".kml,.kmz" multiple style="display: none;">
-
             </div>
 
-
-            <!-- Settings Page -->
-            <div id="settings-page" class="page-content">
-                <div class="settings-container">
-                    <!-- Tab Navigation -->
-                    <div class="tab-nav">
-                        <button class="tab-btn active" data-tab="general">General</button>
-                        <button class="tab-btn" data-tab="ai">AI</button>
-                    </div>
-
-                    <!-- Tab Content -->
-                    <div class="tab-content">
-                        <!-- General Tab -->
-                        <div class="tab-pane active" data-tab="general">
-                            <div class="settings-row">
-                                <div class="setting-item">
-                                    <div class="setting-info">
-                                        <span class="setting-label">Disable Embedding</span>
-                                        <span class="setting-description">Skip AI processing for faster report
-                                            loading</span>
-                                    </div>
-                                    <label class="toggle-switch">
-                                        <input type="checkbox" id="disableEmbeddingToggle">
-                                        <span class="slider"></span>
-                                    </label>
-                                </div>
-                            </div>
-
-                            <div class="settings-row-spacer"></div>
-
-                            <div class="settings-row">
-                                <div class="setting-item">
-                                    <div class="setting-info">
-                                        <span class="setting-label">Clear All Data</span>
-                                        <span class="setting-description">Delete all processed reports and
-                                            embeddings</span>
-                                    </div>
-                                    <button id="clearDataBtn" class="btn-danger">Clear Data</button>
-                                </div>
-                            </div>
-                        </div>
-
-                        <!-- AI Tab -->
-                        <div class="tab-pane" data-tab="ai">
-                            <div class="settings-row">
-                                <div class="input-group">
-                                    <label for="apiKeyInput">API Key</label>
-                                    <input type="password" id="apiKeyInput" placeholder="Enter your API key..."
-                                        class="api-input">
-                                </div>
-                                <div class="input-group">
-                                    <label for="modelSelect">Model</label>
-                                    <select id="modelSelect" class="model-select">
-                                        <option value="glm-4.6">GLM 4.6</option>
-                                    </select>
-                                </div>
-                            </div>
-
-                            <div class="settings-row-spacer"></div>
-
-                            <!-- Rule Input Section -->
-                            <div class="rule-input-section">
-                                <div class="input-group full-width">
-                                    <label for="newRuleInput">New Rule</label>
-                                    <div class="rule-input-container">
-                                        <input type="text" id="newRuleInput" placeholder="Define an AI behavior rule..."
-                                            class="rule-input-text">
-                                        <button id="addRuleBtn" class="add-rule-btn">
-                                            <img src="assets/add-icon.svg" alt="Add" class="add-icon">
-                                        </button>
-                                    </div>
-                                </div>
-                            </div>
-
-                            <!-- Rules List Section -->
-                            <div class="rules-list-section">
-                                <div class="rules-list-header">
-                                    <h3>Active Rules</h3>
-                                </div>
-                                <div id="rulesList" class="rules-list">
-                                    <!-- Rules will be dynamically added here -->
-                                </div>
-                            </div>
-                        </div>
-                    </div>
+            <div class="chat-input">
+                <textarea id="messageInput" placeholder="Type your message..." rows="1"></textarea>
+                <div class="input-actions">
+                    <button id="uploadButton" class="upload-button" title="Upload report">
+                        <img src="assets/attachment.svg" alt="Upload" class="upload-icon">
+                        <span>Upload report</span>
+                    </button>
+                    <button id="sendButton" class="send-button">
+                        <img src="assets/send-arrow.svg" alt="Send" class="send-icon">
+                        <img src="assets/stop-icon.svg" alt="Stop" class="stop-icon">
+                    </button>
                 </div>
             </div>
         </main>
     </div>
 
-    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-    <!-- OpenLayers for KML viewer -->
-    <script src="https://cdn.jsdelivr.net/npm/ol@v9.2.4/dist/ol.js"></script>
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/ol@v9.2.4/ol.css">
+    <!-- Settings Modal -->
+    <div id="settingsModal" class="modal-overlay hidden">
+        <div class="modal">
+            <div class="modal-header">
+                <h2>Settings</h2>
+                <button id="settingsCloseBtn" class="icon-button" title="Close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="input-group">
+                    <label for="chatModelSelect">Chat model</label>
+                    <select id="chatModelSelect" class="model-select"></select>
+                    <span class="setting-description">Tool-capable models installed in Ollama</span>
+                </div>
+
+                <div class="input-group">
+                    <label for="embedModelSelect">Embedding model</label>
+                    <select id="embedModelSelect" class="model-select"></select>
+                    <span class="setting-description">Changing this requires re-uploading reports</span>
+                </div>
+
+                <div class="setting-item">
+                    <div class="setting-info">
+                        <span class="setting-label">Disable embedding</span>
+                        <span class="setting-description">Skip vector indexing for faster report loading</span>
+                    </div>
+                    <label class="toggle-switch">
+                        <input type="checkbox" id="disableEmbeddingToggle">
+                        <span class="slider"></span>
+                    </label>
+                </div>
+
+                <div class="setting-item">
+                    <div class="setting-info">
+                        <span class="setting-label">Clear all data</span>
+                        <span class="setting-description">Delete all processed reports and embeddings</span>
+                    </div>
+                    <button id="clearDataBtn" class="btn-danger">Clear Data</button>
+                </div>
+
+                <div id="settingsStatus" class="settings-status"></div>
+            </div>
+        </div>
+    </div>
+
+    <script src="vendor/marked.min.js"></script>
     <script src="utils/UIManager.js"></script>
-    <script src="utils/navigation.js"></script>
     <script src="services/AIService.js"></script>
     <script src="services/UploadService.js"></script>
     <script src="components/Message.js"></script>
+    <script src="components/Settings.js"></script>
     <script src="components/Chat.js"></script>
     <script src="main.js"></script>
-    <script src="components/KMLViewer.js"></script>
-    <script src="components/Settings.js"></script>
 </body>
 
 </html>
