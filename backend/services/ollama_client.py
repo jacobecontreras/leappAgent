@@ -12,6 +12,11 @@ OLLAMA_URL = "http://127.0.0.1:11434"
 PREFERRED_CHAT_PREFIXES = ["qwen", "llama", "mistral"]
 DEFAULT_EMBED_MODEL = "nomic-embed-text"
 
+# Ollama's default context (4096) silently drops the oldest messages once the
+# system prompt, tool schemas, and tool results exceed it - the model loses
+# the user's question. Artifact catalogs alone can be several thousand tokens.
+NUM_CTX = 16384
+
 
 @dataclass
 class ChatChunk:
@@ -55,7 +60,7 @@ class OllamaClient:
 
     async def chat_stream(self, model: str, messages: list, tools: Optional[list] = None) -> AsyncGenerator[ChatChunk, None]:
         """Stream a chat completion from /api/chat (NDJSON lines)"""
-        payload = {"model": model, "messages": messages, "stream": True}
+        payload = {"model": model, "messages": messages, "stream": True, "options": {"num_ctx": NUM_CTX}}
         if tools:
             payload["tools"] = tools
 
