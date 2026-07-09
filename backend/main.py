@@ -35,7 +35,7 @@ class SettingsRequest(BaseModel):
 @app.post("/upload")
 async def upload_report(request: UploadRequest):
     if not validate_leapp_directory(request.directory_path):
-        raise HTTPException(status_code=400, detail="Invalid LEAPP report directory: No TSV, KML or Timeline directory found")
+        raise HTTPException(status_code=400, detail="Invalid LEAPP report directory: No TSV or Timeline directory found")
 
     job_name = f"report_{int(time.time())}"
     insert_report_metadata(job_name, request.directory_path)

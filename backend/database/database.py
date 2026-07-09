@@ -52,20 +52,6 @@ def init_database():
         )
     ''')
 
-    # GPS/location data extracted from KML files
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS spatial_data (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            job_name TEXT NOT NULL,                -- Links to reports table
-            timestamp TEXT,                         -- Time of location event
-            latitude TEXT,                          -- GPS latitude coordinate
-            longitude TEXT,                         -- GPS longitude coordinate
-            activity TEXT,                          -- What was happening at this location
-            source_artifact TEXT,                   -- Which file this data came from
-            FOREIGN KEY (job_name) REFERENCES reports(job_name) ON DELETE CASCADE
-        )
-    ''')
-
     # Timeline events from Timeline directory files
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS timeline_events (
@@ -97,7 +83,7 @@ def reset_database():
     """Reset the database by dropping all tables except ai_settings"""
     with get_db_cursor() as cursor:
         # List of tables to drop
-        tables = ['reports', 'artifact_types', 'artifact_data', 'spatial_data', 'timeline_events']
+        tables = ['reports', 'artifact_types', 'artifact_data', 'timeline_events', 'ingested_files']
         
         for table in tables:
             cursor.execute(f"DROP TABLE IF EXISTS {table}")
@@ -167,18 +153,6 @@ def store_tsv_data(job_name: str, tsv_data: Dict[str, List[Dict[str, Any]]]):
                 )
 
         logger.info(f"Stored TSV data for job {job_name}: {len(tsv_data)} files")
-
-def store_spatial_data(job_name: str, spatial_data: List[Dict[str, Any]]):
-    """Store spatial data in database"""
-    with get_db_cursor() as cursor:
-        for data in spatial_data:
-            cursor.execute(
-                "INSERT INTO spatial_data (job_name, timestamp, latitude, longitude, activity, source_artifact) VALUES (?, ?, ?, ?, ?, ?)",
-                (job_name, data.get('timestamp'), data.get('latitude'), data.get('longitude'),
-                 data.get('activity'), data.get('source_artifact'))
-            )
-
-        logger.info(f"Stored spatial data for job {job_name}: {len(spatial_data)} locations")
 
 def store_timeline_data(job_name: str, timeline_data: List[Dict[str, Any]]):
     """Store timeline data in database"""

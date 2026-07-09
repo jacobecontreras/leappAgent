@@ -2,15 +2,15 @@ import os
 import logging
 import time
 from parsers.tsv_parser import parse_tsv_directory
-from parsers.leapp_db_parser import parse_spatial_db, parse_timeline_db
-from database.database import update_report_status, store_tsv_data, store_spatial_data, store_timeline_data
+from parsers.leapp_db_parser import parse_timeline_db
+from database.database import update_report_status, store_tsv_data, store_timeline_data
 from utils.embedding_utils import embed_job_data
 from services.settings_service import settings_service
 
 logger = logging.getLogger(__name__)
 
 # Required subdirectories in LEAPP reports
-REQUIRED_DIRS = ['_TSV Exports', '_KML Exports', '_Timeline']
+REQUIRED_DIRS = ['_TSV Exports', '_Timeline']
 
 
 def validate_leapp_directory(directory_path: str) -> bool:
@@ -36,12 +36,6 @@ def process_leapp_report(job_name: str, directory_path: str):
         tsv_path = os.path.join(directory_path, '_TSV Exports')
         tsv_data = parse_tsv_directory(tsv_path)
         store_tsv_data(job_name, tsv_data)
-
-        # Process spatial data and store data and store data in SQLite
-        logger.info(f"Processing spatial data for job: {job_name}")
-        spatial_path = os.path.join(directory_path, '_KML Exports', '_latlong.db')
-        spatial_data = parse_spatial_db(spatial_path)
-        store_spatial_data(job_name, spatial_data)
 
         # Process timeline data and store data and store data in SQLite
         logger.info(f"Processing timeline data for job: {job_name}")

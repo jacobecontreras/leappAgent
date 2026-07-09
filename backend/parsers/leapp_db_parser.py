@@ -43,12 +43,3 @@ def parse_timeline_db(db_path: str) -> List[Dict[str, Any]]:
         field_mapping=['key', 'activity', 'datalist'],
         source_artifact='tl.db'
     )
-
-def parse_spatial_db(db_path: str) -> List[Dict[str, Any]]:
-    """Parse LEAPP's KML database into ours"""
-    return parse_leapp_db(
-        db_path=db_path,
-        query="SELECT timestamp, latitude, longitude, activity FROM data",
-        field_mapping=['timestamp', 'latitude', 'longitude', 'activity'],
-        source_artifact='_latlong.db'
-    )
