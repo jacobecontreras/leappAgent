@@ -65,15 +65,32 @@ def init_database():
         )
     ''')
 
+    # SHA-256 manifest of source evidence files hashed at ingest
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS ingested_files (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_name TEXT NOT NULL,                -- Links to reports table
+            file_path TEXT NOT NULL,               -- Absolute path to source file
+            file_name TEXT NOT NULL,               -- Base filename
+            sha256 TEXT NOT NULL,                  -- SHA-256 of file contents at ingest
+            size_bytes INTEGER,                    -- File size at ingest
+            hashed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (job_name) REFERENCES reports(job_name) ON DELETE CASCADE
+        )
+    ''')
+
     # AI settings for the application
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS ai_settings (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            setting_key TEXT UNIQUE NOT NULL,       -- 'api_key', 'model', 'rules'
-            setting_value TEXT NOT NULL,            -- Setting value (JSON for rules)
+            setting_key TEXT UNIQUE NOT NULL,       -- 'chat_model', 'embed_model', 'disable_embedding'
+            setting_value TEXT NOT NULL,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+
+    # Remove settings from the pre-Ollama versions of the app
+    cursor.execute("DELETE FROM ai_settings WHERE setting_key IN ('api_key', 'rules', 'model')")
 
     # Save changes and close connection
     conn.commit()
@@ -93,8 +110,9 @@ def reset_database():
     logger.info("Database reset successfully")
 
 def get_db_connection():
-    """Get database connection"""
-    return sqlite3.connect(os.path.join(os.path.dirname(__file__), DB_NAME))
+    """Get database connection (path overridable via LEAPP_DB_PATH for tests)"""
+    db_path = os.environ.get("LEAPP_DB_PATH", os.path.join(os.path.dirname(__file__), DB_NAME))
+    return sqlite3.connect(db_path)
 
 @contextmanager
 def get_db_cursor():
@@ -153,6 +171,14 @@ def store_tsv_data(job_name: str, tsv_data: Dict[str, List[Dict[str, Any]]]):
                 )
 
         logger.info(f"Stored TSV data for job {job_name}: {len(tsv_data)} files")
+
+def store_ingested_file(job_name: str, file_path: str, sha256: str, size_bytes: int):
+    """Record a source file's hash in the ingest manifest"""
+    with get_db_cursor() as cursor:
+        cursor.execute(
+            "INSERT INTO ingested_files (job_name, file_path, file_name, sha256, size_bytes) VALUES (?, ?, ?, ?, ?)",
+            (job_name, file_path, os.path.basename(file_path), sha256, size_bytes)
+        )
 
 def store_timeline_data(job_name: str, timeline_data: List[Dict[str, Any]]):
     """Store timeline data in database"""
