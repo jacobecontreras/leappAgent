@@ -58,11 +58,23 @@ class OllamaClient:
             logger.warning(f"Failed to fetch capabilities for model {name}: {e}")
             return []
 
-    async def chat_stream(self, model: str, messages: list, tools: Optional[list] = None) -> AsyncGenerator[ChatChunk, None]:
-        """Stream a chat completion from /api/chat (NDJSON lines)"""
+    @staticmethod
+    def _build_payload(model: str, messages: list, tools: Optional[list] = None,
+                       format: Optional[dict] = None, think: Optional[str] = None) -> dict:
         payload = {"model": model, "messages": messages, "stream": True, "options": {"num_ctx": NUM_CTX}}
         if tools:
             payload["tools"] = tools
+        if format is not None:
+            payload["format"] = format
+        # Only send "think" when set: Ollama rejects it for non-thinking models
+        if think is not None:
+            payload["think"] = think
+        return payload
+
+    async def chat_stream(self, model: str, messages: list, tools: Optional[list] = None,
+                          format: Optional[dict] = None, think: Optional[str] = None) -> AsyncGenerator[ChatChunk, None]:
+        """Stream a chat completion from /api/chat (NDJSON lines)"""
+        payload = self._build_payload(model, messages, tools, format, think)
 
         async with httpx.AsyncClient(timeout=300.0) as client:
             async with client.stream("POST", f"{self.base_url}/api/chat", json=payload) as response:

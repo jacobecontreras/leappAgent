@@ -28,6 +28,20 @@ def tmp_audit_dir(tmp_path, monkeypatch):
     return audit_dir
 
 
+@pytest.fixture
+def ingested_report(tmp_db, tmp_path, monkeypatch):
+    """A fake LAVA report ingested as 'job_pipe' with embedding disabled"""
+    from database.database import insert_report_metadata
+    from services.settings_service import settings_service
+    from utils import processing_utils
+    make_lava_report(tmp_path)
+    settings_service.set_disable_embedding(True)
+    monkeypatch.setattr(processing_utils, "embed_job_data", lambda job: None)
+    insert_report_metadata("job_pipe", str(tmp_path))
+    processing_utils.process_leapp_report("job_pipe", str(tmp_path))
+    return "job_pipe"
+
+
 def make_lava_report(tmp_path, call_count=3, long_message=False, complete=True):
     """Build a minimal LAVA-format report: _lava_artifacts.db + _lava_data.lava"""
     conn = sqlite3.connect(tmp_path / "_lava_artifacts.db")
@@ -105,8 +119,9 @@ class FakeOllamaClient:
         self.turns = list(turns)
         self.calls = []
 
-    async def chat_stream(self, model, messages, tools=None):
-        self.calls.append({"model": model, "messages": list(messages), "tools": tools})
+    async def chat_stream(self, model, messages, tools=None, format=None, think=None):
+        self.calls.append({"model": model, "messages": list(messages), "tools": tools,
+                           "format": format, "think": think})
         if not self.turns:
             return
         for chunk in self.turns.pop(0):
@@ -116,6 +131,11 @@ class FakeOllamaClient:
 def content_turn(*tokens):
     """A model turn that streams content only (a final answer)"""
     return [ChatChunk(content=token) for token in tokens] + [ChatChunk(done=True)]
+
+
+def json_turn(obj):
+    """A model turn that streams one JSON object (router/SQL structured output)"""
+    return content_turn(json.dumps(obj))
 
 
 def tool_call_turn(name, arguments, content=""):
