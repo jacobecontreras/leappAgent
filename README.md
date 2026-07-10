@@ -6,7 +6,7 @@
 
 This project explores the mechanics of AI agents within a forensic context. Its primary utility is to assist in locating evidence within LEAPP reports.
 
-The system pairs a custom ReAct (Reasoning + Acting) agent, written from scratch, with read-only SQL access to the LAVA artifact database that modern LEAPP tools produce. The agent answers structured questions (counts, filters, time ranges, joins) by writing SQL against the report's own data, and falls back to semantic search for vague content questions.
+The system pairs a staged agent pipeline, written from scratch, with read-only SQL access to the LAVA artifact database that modern LEAPP tools produce. A router classifies each question, the pipeline inspects the relevant artifact schemas deterministically, and the model writes SQL against the report's own data - with error-grounded retries and a hard gate that refuses to answer evidence questions when no query succeeded. Vague content questions fall back to semantic search, and open-ended investigations to a bounded ReAct loop.
 
 ## Forensic posture
 
@@ -18,8 +18,9 @@ The system pairs a custom ReAct (Reasoning + Acting) agent, written from scratch
 
 ## Features
 
-- **Custom ReAct agent:** a hand-written reasoning loop using Ollama's native tool calling.
-- **Text-to-SQL tools:** the agent discovers artifacts by category (`viewArtifactList`), inspects a table's columns, types, and sample rows before querying (`describeArtifact`), runs guarded read-only SQL (`queryArtifacts`), and can hunt a value across every artifact table at once (`searchArtifacts`).
+- **Staged pipeline:** question routing, schema inspection, SQL generation, and retry logic are fixed code paths - the model makes only the decisions it is good at (classification and SQL). Unroutable questions fall back to a hand-written, bounded ReAct loop using Ollama's native tool calling.
+- **Text-to-SQL tools:** the pipeline inspects a table's columns, types, and sample rows before querying (`describeArtifact`), runs guarded read-only SQL (`queryArtifacts`), and can hunt a value across every artifact table at once (`searchArtifacts`).
+- **Anti-hallucination gate:** answers to evidence questions are refused in code when no query or search succeeded - the model cannot answer from memory.
 - **Scoped RAG pipeline:** free-text columns (messages, notes, titles) are embedded via a local Ollama embedding model into a persistent ChromaDB store for semantic search; structured data is served by SQL, not vectors.
 - **Transparent reasoning:** the chat streams the agent's thinking and tool calls into a collapsible per-message process view.
 
@@ -36,7 +37,7 @@ Requires Python 3.11+ and [Ollama](https://ollama.com/download).
 
 ```bash
 # Pull a tool-capable chat model and an embedding model
-ollama pull qwen3
+ollama pull gpt-oss:20b
 ollama pull nomic-embed-text
 
 # Install dependencies
