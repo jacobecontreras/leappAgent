@@ -1,4 +1,4 @@
-# LEAPP Custom ReAct Agent
+# LEAPP Agent
 
 > **DISCLAIMER:** This tool is a proof-of-concept designed strictly for educational purposes and data location assistance. It is **not** a substitute for manual data verification or forensic conclusions. All outputs must be verified against the original evidence.
 
