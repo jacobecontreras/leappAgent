@@ -1,228 +1,357 @@
+import asyncio
 import json
 import logging
+from itertools import count
+from typing import AsyncGenerator, Optional
+
 from tools import execute_tool
-from typing import AsyncGenerator
-from services.ai_service import get_ai_service
+from tools.ollama_schemas import get_ollama_tools
+from services import pipeline
+from services.ollama_client import ollama_client
 from services.session_manager import session_manager
-from services.system_prompt import SYSTEM_PROMPT
+from services.system_prompt import (DIRECT_PROMPT, NO_REPORT_PROMPT, REACT_SYSTEM_PROMPT,
+                                    REFUSAL_MESSAGE, SYNTHESIS_PROMPT, ZERO_ROWS_HINT)
 from services.settings_service import settings_service
-from utils.stream_utils import parse_stream_token, StreamResult
+from logs.audit import audit_logger
 
 logger = logging.getLogger(__name__)
 
+REACT_MAX_ITERATIONS = 8
+MAX_SQL_ATTEMPTS = 3
+SYNTHESIS_MAX_ROWS = 50
+TOOL_RESULT_SUMMARY_LIMIT = 2000
+MAX_ITERATIONS_MESSAGE = "I've reached the maximum number of steps. Please try a more specific question."
+
+
+def _event(event_type: str, **payload) -> str:
+    return json.dumps({"type": event_type, **payload})
+
 
 class AgentService:
-    def __init__(self):
-        self.system_prompt = SYSTEM_PROMPT
+    def _begin_tool_call(self, call_id: int, name: str, arguments: dict,
+                         job_name: Optional[str]) -> str:
+        """Build the tool_call event, emitted before execution so the UI can
+        show progress while the tool runs. Injects job_name into arguments."""
+        if job_name and "job_name" not in arguments:
+            arguments["job_name"] = job_name
+        return _event("tool_call", call_id=call_id, name=name, arguments=arguments)
 
-    def _setup_chat_history(self, prompt: str, session_id: str) -> list:
-        """Setup chat history with session context"""
-        # Build system prompt with user rules
-        system_prompt = self._build_system_prompt()
+    async def _run_tool(self, call_id: int, name: str, arguments: dict,
+                        session_id: str, chat_model: str, stage) -> tuple:
+        """Execute one tool call, audit it, and return (tool_result_event, result).
 
-        chat_history = [{"role": "system", "content": system_prompt}]
+        The tool itself runs synchronously on the event loop; the sleep(0)
+        lets the transport flush the already-yielded tool_call event to the
+        client before the tool blocks the loop.
+        """
+        await asyncio.sleep(0)
 
-        # Add last three loops
-        context_messages = session_manager.get_context_for_ai(session_id)
-        chat_history.extend(context_messages)
+        audit_logger.log(session_id, chat_model, "tool_call",
+                         {"stage": stage, "name": name, "arguments": arguments})
 
-        # Add user prompt
-        chat_history.append({
-            "role": "user",
-            "content": prompt
+        result = execute_tool(name, arguments)
+        success = bool(result.get("success", True))
+
+        audit_logger.log(session_id, chat_model, "tool_result", {
+            "name": name,
+            "success": success,
+            "result_summary": json.dumps(result, default=str)[:TOOL_RESULT_SUMMARY_LIMIT],
+            "count": result.get("count")
         })
 
-        return chat_history
-
-    def _build_system_prompt(self) -> str:
-        """Build system prompt with base prompt plus user-defined rules"""
-        system_prompt = self.system_prompt
-
-        # Get user rules
-        user_rules = settings_service.get_rules()
-
-        if user_rules:
-            # Add user rules section
-            rules_text = "\n\nUSER-DEFINED RULES:\n"
-            for i, rule in enumerate(user_rules, 1):
-                if isinstance(rule, dict) and 'text' in rule:
-                    rules_text += f"{i}. {rule['text']}\n"
-                else:
-                    rules_text += f"{i}. {rule}\n"
-
-            system_prompt += rules_text
-
-        return system_prompt
-
-    async def _process_ai_stream(self, chat_history: list) -> tuple:
-        """Process AI response stream and return parsed results"""
-        accumulated = ""
-        finish_buffer = ""
-        streamed_fields = set()
-        thought_buffer = None
-
-        # Initialize result to prevent UnboundLocalError
-        result = None
-
-        ai_service_instance = get_ai_service()
-        async for token in ai_service_instance.chat_stream_with_context(chat_history):
-            result = parse_stream_token(token, accumulated, finish_buffer, streamed_fields, thought_buffer)
-
-            # Update state
-            accumulated = result.accumulated
-            finish_buffer = result.finish_buffer
-            streamed_fields = result.streamed_fields
-            thought_buffer = result.thought_buffer
-
-            # Stream outputs
-            for output in result.outputs:
-                yield output
-
-            # Check for completion
-            if result.is_complete:
-                break
-
-        # Return final results with fallback if no result was ever created
-        if result is None:
-            # Handle empty stream case, no tokens were received
-            logger.warning("AI stream returned no tokens, using empty response")
-            result = StreamResult(
-                outputs=[],
-                accumulated="",
-                finish_buffer="",
-                streamed_fields=set(),
-                is_complete=True,
-                final_answer="I apologize, but I couldn't generate a response. Please try again.",
-                thought_buffer={"has_thought": False, "thought_content": "", "thought_streamed": False}
-            )
-            accumulated = ""
-            streamed_fields = set()
-
-        action_streamed = "action" in streamed_fields
-        yield accumulated, result.is_complete, action_streamed, result.final_answer
-
-    def _handle_tool_execution(self, accumulated_response: str, chat_history: list, tool_results_used: list, job_name: str = None):
-        """Execute tool and update chat history"""
-        try:
-            response_data = json.loads(accumulated_response)
-            tool_name = response_data["action"]["name"]
-            tool_input = response_data["action"]["input"]
-
-            # Parse tool_input and add job_name if needed
-            if isinstance(tool_input, str):
-                try:
-                    tool_input = json.loads(tool_input)
-                except json.JSONDecodeError:
-                    tool_input = {"query": tool_input}
-
-            if isinstance(tool_input, dict) and job_name and "job_name" not in tool_input:
-                tool_input["job_name"] = job_name
-
-            # Execute tool
-            tool_result = execute_tool(tool_name, tool_input)
-            tool_results_used.append(tool_result)
-
-            # Check if tool execution failed due to non-existent tool
-            if not tool_result.get("success") and "not found" in tool_result.get("error", ""):
-                error_type = tool_result.get("error_type")
-                if error_type in ["report_not_found", "artifact_not_found"]:
-                    # Use educational feedback directly
-                    enhanced_error_message = tool_result.get("error")
-                else:
-                    # Handle generic "not found" errors
-                    from tools import TOOLS
-                    available_tools = list(TOOLS.keys())
-                    enhanced_error_message = f"Tool '{tool_name}' does not exist. Available tools are: {', '.join(available_tools)}. Please use one of the available tools or provide your final answer in the Final format."
-
-                # Add the original response and enhanced error message to chat
-                chat_history.append({
-                    "role": "assistant",
-                    "content": accumulated_response
-                })
-                chat_history.append({
-                    "role": "user",
-                    "content": f"Error: {enhanced_error_message}"
-                })
-            else:
-                # Add normal tool result to chat
-                chat_history.append({
-                    "role": "assistant",
-                    "content": accumulated_response
-                })
-                chat_history.append({
-                    "role": "user",
-                    "content": f"Tool result: {json.dumps(tool_result)}"
-                })
-        except Exception as e:
-            # Handle other errors silently to avoid disrupting the flow
-            pass
-
-    async def process_agent_message(self, prompt: str, session_id: str, job_name: str = None) -> AsyncGenerator[str, None]:
-        """Process prompt through agent loop with tool execution and session context"""
-
-        # Get the chat history context for the AI
-        chat_history = self._setup_chat_history(prompt, session_id)
-
-        iteration = 0
-        max_iterations = 50 # Arbitrary for now
-        tool_results_used = []
-
-        while iteration < max_iterations:
-            iteration += 1
-
-            # Add spacing between agent loops (except for first iteration)
-            if iteration > 1:
-                yield json.dumps({
-                    "type": "agent_process",
-                    "content": "\n"
-                })
-
-            # Format reinforcement every iteration to prevent context dilution
-            if iteration > 3:
-                chat_history.append({
-                    "role": "system",
-                    "content": "REMEMBER: JSON format only - {'thought': '...', 'action': {...}} or {'thought': '...', 'finish': '...'}. CRITICAL: NEVER use 'finish' as an action name in Tools format!"
-                })
-
-            # Process AI stream
-            accumulated_response = ""
-            finish_found = False
-            action_streamed = False
-
-            async for result in self._process_ai_stream(chat_history):
-                # We are still streaming
-                if isinstance(result, str):
-                    yield result
-                # Done streaming
-                else:
-                    accumulated_response, finish_found, action_streamed, final_answer = result # Take important bits from AI output
-
-            # If we found a final answer during streaming, break out of the main loop
-            if finish_found:
-                final_answer = accumulated_response
-                break
-
-            # If action was found, execute it and continue to next iteration
-            if action_streamed:
-                self._handle_tool_execution(accumulated_response, chat_history, tool_results_used, job_name)
-                continue
-
-            # If no finish or action found, treat as direct answer
-            final_answer = accumulated_response
-            yield json.dumps({
-                "type": "final_answer",
-                "content": final_answer
+        if name == "semanticSearch" and success:
+            audit_logger.log(session_id, chat_model, "retrieval", {
+                "query": arguments.get("query"),
+                "n_results": len(result.get("results", [])),
+                "chunk_ids": [r.get("id") for r in result.get("results", [])],
+                "distances": [r.get("distance") for r in result.get("results", [])],
+                "embed_model": settings_service.get_embed_model()
             })
 
-        else:
-            # Max iterations reached
-            if not final_answer:
-                final_answer = "\n\nI've reached the maximum number of steps. Please try a more specific question."
-            else:
-                final_answer += "\n\nI've reached the maximum number of steps. Please try a more specific question."
-            yield final_answer
+        event = _event("tool_result", call_id=call_id, name=name, success=success,
+                       summary=json.dumps(result, default=str)[:TOOL_RESULT_SUMMARY_LIMIT])
+        return event, result
 
-        # Add assistant message and store agent loop in session
+    def _build_evidence_block(self, question: str, evidence: list, catalog: list) -> str:
+        """Serialize executed queries/searches plus source paths for synthesis"""
+        used_tables = {t for item in evidence for t in item.get("tables", [])}
+        sources = [
+            {"artifact": row["artifact_name"], "tablename": row["tablename"],
+             "source_path": row["source_path"]}
+            for row in catalog if row["tablename"] in used_tables
+        ]
+        parts = [f"Question: {question}"]
+        for item in evidence:
+            parts.append(f"\n{item['label']}:\n{json.dumps(item['data'], default=str)}")
+        if sources:
+            parts.append(f"\nEvidence sources:\n{json.dumps(sources)}")
+        return "\n".join(parts)
+
+    def _cap_query_result(self, result: dict) -> dict:
+        """Cap serialized rows fed to synthesis; note the truncation in-band"""
+        rows = result.get("rows")
+        if isinstance(rows, list) and len(rows) > SYNTHESIS_MAX_ROWS:
+            capped = dict(result)
+            capped["rows"] = rows[:SYNTHESIS_MAX_ROWS]
+            capped["note"] = f"showing first {SYNTHESIS_MAX_ROWS} of {len(rows)} returned rows"
+            return capped
+        return result
+
+    async def process_agent_message(self, prompt: str, session_id: str,
+                                    job_name: str = None) -> AsyncGenerator[str, None]:
+        """Staged pipeline: route -> describe -> SQL/search with retry -> gated synthesis.
+
+        Falls back to a bounded ReAct loop for exploratory or unroutable questions.
+        """
+        chat_model = settings_service.get_chat_model()
+        if not chat_model:
+            yield _event("error", message="No chat model configured. Open settings and select an installed Ollama model.")
+            return
+
+        audit_logger.log(session_id, chat_model, "user_message", {"message": prompt})
+        history = session_manager.get_context_for_ai(session_id)
+        call_counter = count(1)  # correlates tool_call/tool_result pairs in the UI
+
+        try:
+            resolved_job = pipeline.resolve_job(job_name)
+            audit_logger.log(session_id, chat_model, "job_resolved",
+                             {"job_name": resolved_job, "explicit": bool(job_name)})
+
+            if not resolved_job:
+                messages = [{"role": "system", "content": NO_REPORT_PROMPT}] + history + [
+                    {"role": "user", "content": prompt}]
+                async for event in self._finish(chat_model, messages, session_id, prompt):
+                    yield event
+                return
+
+            catalog = pipeline.load_catalog(resolved_job)
+            catalog_text = pipeline.render_catalog(catalog)
+            tablenames = [row["tablename"] for row in catalog]
+
+            route, raw = await pipeline.route_question(chat_model, prompt, catalog_text,
+                                                       history, tablenames)
+            audit_logger.log(session_id, chat_model, "route", {
+                "route": route.route if route else None,
+                "tables": route.tables if route else [],
+                "query_text": route.query_text if route else "",
+                "raw": raw[:500],
+                **({} if route else {"fallback_reason": "unparseable"})
+            })
+
+            if route is None or route.route == "exploratory":
+                async for event in self._react_loop(prompt, session_id, resolved_job,
+                                                    chat_model, catalog_text, history,
+                                                    call_counter):
+                    yield event
+                return
+
+            yield _event("route", route=route.route, tables=route.tables, job_name=resolved_job)
+
+            if route.route == "direct":
+                messages = [{"role": "system", "content": DIRECT_PROMPT + catalog_text}] + history + [
+                    {"role": "user", "content": prompt}]
+                async for event in self._finish(chat_model, messages, session_id, prompt):
+                    yield event
+                return
+
+            # Evidence routes: gather via SQL or search, then synthesize behind the gate
+            evidence = []
+            if route.route == "structured_query":
+                async for event in self._structured_query(prompt, route, resolved_job, session_id,
+                                                          chat_model, history, evidence,
+                                                          call_counter):
+                    yield event
+                if evidence and evidence[0].get("fallback"):
+                    async for event in self._react_loop(prompt, session_id, resolved_job,
+                                                        chat_model, catalog_text, history,
+                                                        call_counter):
+                        yield event
+                    return
+            else:
+                tool_name = "searchArtifacts" if route.route == "text_search" else "semanticSearch"
+                arg_key = "pattern" if route.route == "text_search" else "query"
+                query_text = route.query_text or prompt
+                arguments = {arg_key: query_text}
+                call_id = next(call_counter)
+                yield self._begin_tool_call(call_id, tool_name, arguments, resolved_job)
+                event, result = await self._run_tool(call_id, tool_name, arguments,
+                                               session_id, chat_model, route.route)
+                yield event
+                if result.get("success"):
+                    matched = []
+                    for r in result.get("results", []):
+                        if not isinstance(r, dict):
+                            continue
+                        # searchArtifacts puts tablename top-level; semanticSearch in metadata
+                        tablename = r.get("tablename") or (r.get("metadata") or {}).get("tablename")
+                        if tablename:
+                            matched.append(tablename)
+                    evidence.append({"label": f"{tool_name}('{query_text}') results",
+                                     "data": result, "tables": matched})
+
+            if not evidence:
+                audit_logger.log(session_id, chat_model, "gate_refusal",
+                                 {"route": route.route, "attempts": MAX_SQL_ATTEMPTS})
+                yield _event("final", content=REFUSAL_MESSAGE)
+                audit_logger.log(session_id, chat_model, "final_answer", {"content": REFUSAL_MESSAGE})
+                session_manager.add_agent_loop(session_id, prompt, REFUSAL_MESSAGE)
+                return
+
+            evidence_block = self._build_evidence_block(prompt, evidence, catalog)
+            messages = [{"role": "system", "content": SYNTHESIS_PROMPT}] + history + [
+                {"role": "user", "content": evidence_block}]
+            async for event in self._finish(chat_model, messages, session_id, prompt):
+                yield event
+
+        except Exception as e:
+            logger.error(f"Agent pipeline failed: {e}")
+            audit_logger.log(session_id, chat_model, "error", {"message": str(e)})
+            yield _event("error", message=str(e))
+
+    async def _structured_query(self, prompt: str, route, job_name: str, session_id: str,
+                                chat_model: str, history: list, evidence: list,
+                                call_counter) -> AsyncGenerator[str, None]:
+        """Forced describe -> SQL generation -> execute with grounded retry.
+
+        Appends successful query results to evidence; appends a fallback marker
+        when no schema could be described (caller then runs the ReAct loop).
+        """
+        describes = []
+        for tablename in route.tables:
+            arguments = {"tablename": tablename}
+            call_id = next(call_counter)
+            yield self._begin_tool_call(call_id, "describeArtifact", arguments, job_name)
+            event, result = await self._run_tool(call_id, "describeArtifact", arguments,
+                                           session_id, chat_model, "schema_link")
+            yield event
+            if result.get("success"):
+                describes.append(result)
+
+        if not describes:
+            audit_logger.log(session_id, chat_model, "route",
+                             {"route": "exploratory", "fallback_reason": "schema_link_failed"})
+            evidence.append({"fallback": True, "tables": [], "label": "", "data": None})
+            return
+
+        feedback = None
+        zero_retry_used = False
+        for attempt in range(1, MAX_SQL_ATTEMPTS + 1):
+            sql = await pipeline.generate_sql(chat_model, prompt, describes, history, feedback)
+            if sql is None:
+                audit_logger.log(session_id, chat_model, "sql_attempt",
+                                 {"attempt": attempt, "sql": None, "success": False,
+                                  "error": "unparseable generation output"})
+                feedback = 'Your previous output was not valid JSON of the form {"sql": "..."}. Return only that JSON.'
+                continue
+
+            arguments = {"sql": sql}
+            call_id = next(call_counter)
+            yield self._begin_tool_call(call_id, "queryArtifacts", arguments, job_name)
+            event, result = await self._run_tool(call_id, "queryArtifacts", arguments,
+                                           session_id, chat_model, "sql")
+            yield event
+
+            if not result.get("success"):
+                error = result.get("error", "query failed")
+                audit_logger.log(session_id, chat_model, "sql_attempt",
+                                 {"attempt": attempt, "sql": sql, "success": False, "error": error})
+                feedback = f"Your query failed with this error:\n{error}"
+                continue
+
+            row_count = result.get("row_count", 0)
+            audit_logger.log(session_id, chat_model, "sql_attempt",
+                             {"attempt": attempt, "sql": sql, "success": True,
+                              "row_count": row_count})
+            if row_count == 0 and not zero_retry_used:
+                zero_retry_used = True
+                feedback = ZERO_ROWS_HINT
+                continue
+
+            # A 0-row result after the retry is valid evidence: "no matching records"
+            evidence.append({"label": f"Executed SQL: {sql}",
+                             "data": self._cap_query_result(result),
+                             "tables": [d.get("tablename") for d in describes]})
+            return
+
+    async def _finish(self, chat_model: str, messages: list, session_id: str,
+                      prompt: str) -> AsyncGenerator[str, None]:
+        """Stream the final answer, audit it, and store the loop in the session"""
+        final_answer = ""
+        async for chunk in ollama_client.chat_stream(chat_model, messages):
+            if chunk.thinking:
+                yield _event("thinking", content=chunk.thinking)
+            if chunk.content:
+                final_answer += chunk.content
+                yield _event("token", content=chunk.content)
+        yield _event("final", content=final_answer)
+        audit_logger.log(session_id, chat_model, "final_answer", {"content": final_answer})
+        if final_answer:
+            session_manager.add_agent_loop(session_id, prompt, final_answer)
+
+    async def _react_loop(self, prompt: str, session_id: str, job_name: str, chat_model: str,
+                          catalog_text: str, history: list,
+                          call_counter) -> AsyncGenerator[str, None]:
+        """Bounded ReAct fallback for exploratory questions"""
+        system = (f"{REACT_SYSTEM_PROMPT}\n\nThe loaded report is '{job_name}'.\n\n"
+                  f"ARTIFACT CATALOG:\n{catalog_text}")
+        messages = [{"role": "system", "content": system}] + history + [
+            {"role": "user", "content": prompt}]
+        tools = get_ollama_tools()
+        seen_calls = set()
+
+        final_answer = ""
+        for iteration in range(1, REACT_MAX_ITERATIONS + 1):
+            content = ""
+            tool_calls = []
+
+            async for chunk in ollama_client.chat_stream(chat_model, messages, tools):
+                if chunk.thinking:
+                    yield _event("thinking", content=chunk.thinking)
+                if chunk.content:
+                    content += chunk.content
+                    yield _event("token", content=chunk.content)
+                if chunk.tool_calls:
+                    tool_calls.extend(chunk.tool_calls)
+
+            if not tool_calls:
+                final_answer = content
+                break
+
+            messages.append({"role": "assistant", "content": content, "tool_calls": tool_calls})
+            for call in tool_calls:
+                function = call.get("function", {})
+                name = function.get("name", "")
+                arguments = function.get("arguments") or {}
+                # Ollama normally pre-parses arguments to a dict; guard against strings
+                if isinstance(arguments, str):
+                    try:
+                        arguments = json.loads(arguments)
+                    except json.JSONDecodeError:
+                        arguments = {}
+
+                call_key = (name, json.dumps(arguments, sort_keys=True, default=str))
+                if call_key in seen_calls:
+                    result = {"success": False,
+                              "error": "repeated_call: identical tool call already made - use the earlier result or answer now"}
+                    call_id = next(call_counter)
+                    yield _event("tool_call", call_id=call_id, name=name, arguments=arguments)
+                    yield _event("tool_result", call_id=call_id, name=name, success=False,
+                                 summary=json.dumps(result))
+                else:
+                    seen_calls.add(call_key)
+                    call_id = next(call_counter)
+                    yield self._begin_tool_call(call_id, name, arguments, job_name)
+                    event, result = await self._run_tool(call_id, name, arguments, session_id,
+                                                   chat_model, iteration)
+                    yield event
+                # Tool results feed back to the model as role:"tool" messages
+                messages.append({"role": "tool", "tool_name": name,
+                                 "content": json.dumps(result, default=str)})
+        else:
+            final_answer = MAX_ITERATIONS_MESSAGE
+
+        yield _event("final", content=final_answer)
+        audit_logger.log(session_id, chat_model, "final_answer", {"content": final_answer})
         if final_answer:
             session_manager.add_agent_loop(session_id, prompt, final_answer)
 

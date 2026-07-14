@@ -2,11 +2,12 @@ import os
 import chromadb
 import logging
 from typing import List, Dict, Any, Optional
-from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
+
+from services.ollama_embedding import OllamaEmbeddingFunction
+from services.settings_service import settings_service
 
 COLLECTION_NAME = "artifact_chunks"
 BATCH_SIZE = 100
-DEFAULT_MODEL = "all-MiniLM-L6-v2"
 
 logger = logging.getLogger(__name__)
 
@@ -20,21 +21,26 @@ class ChromaService:
 
         os.makedirs(persist_directory, exist_ok=True)
 
-        # Initialize ChromaDB client
+        # Initialize ChromaDB client; the collection is created lazily because
+        # the embedding model may not be resolved until the first health check
         self.client = chromadb.PersistentClient(path=persist_directory)
+        self._collection = None
+        self._embed_model = None
 
-        # Initialize embedding function with MPS GPU support 
-        self.embedding_function = SentenceTransformerEmbeddingFunction(
-            model_name=DEFAULT_MODEL,
-            device='mps'
-        )
+    def _get_collection(self):
+        """Get or create the collection with the configured Ollama embedding model"""
+        embed_model = settings_service.get_embed_model()
+        if not embed_model:
+            raise RuntimeError("No embedding model configured. Select one in settings or pull nomic-embed-text.")
 
-        # Get or create collection
-        self.collection = self.client.get_or_create_collection(
-            name=COLLECTION_NAME,
-            embedding_function=self.embedding_function,
-            metadata={"description": "LEAPP forensic report artifact chunks"}
-        )
+        if self._collection is None or embed_model != self._embed_model:
+            self._embed_model = embed_model
+            self._collection = self.client.get_or_create_collection(
+                name=COLLECTION_NAME,
+                embedding_function=OllamaEmbeddingFunction(embed_model),
+                metadata={"description": "LEAPP forensic report artifact chunks"}
+            )
+        return self._collection
 
     def embed_and_store_chunks(self, job_name: str, chunks_data: List[Dict[str, Any]]) -> bool:
         """Embed and store chunks in ChromaDB"""
@@ -42,56 +48,46 @@ class ChromaService:
             if not chunks_data:
                 return True
 
-            # Prepare documents and metadata
-            documents = []
-            metadatas = []
-            ids = []
+            collection = self._get_collection()
 
-            for chunk in chunks_data:
-                # Use the JSON data as document
-                document = chunk['data_json']
-                documents.append(document)
-
-                # Prepare metadata
-                metadata = {
-                    'job_name': chunk['job_name'],
-                    'artifact_type_id': chunk['artifact_type_id'],
-                    'row_index': chunk['row_index'],
-                    'file_name': chunk.get('file_name', 'unknown')
-                }
-                metadatas.append(metadata)
-
-                # Create unique ID
-                chunk_id = f"{job_name}_{chunk['artifact_type_id']}_{chunk['row_index']}"
-                ids.append(chunk_id)
+            documents = [chunk['document'] for chunk in chunks_data]
+            metadatas = [chunk['metadata'] for chunk in chunks_data]
+            ids = [chunk['id'] for chunk in chunks_data]
 
             # Add to collection in batches to avoid memory issues
             for i in range(0, len(documents), BATCH_SIZE):
                 batch_end = min(i + BATCH_SIZE, len(documents))
-                self.collection.add(
+                collection.add(
                     documents=documents[i:batch_end],
                     metadatas=metadatas[i:batch_end],
                     ids=ids[i:batch_end]
                 )
+                logger.info(f"Embedded {batch_end}/{len(documents)} chunks for job {job_name}")
 
             return True
 
         except Exception as e:
+            logger.error(f"Failed to embed chunks for job {job_name}: {e}")
             return False
 
     def reset_collection(self) -> bool:
         """Reset the ChromaDB collection"""
         try:
             self.client.delete_collection(COLLECTION_NAME)
-            self.collection = self.client.get_or_create_collection(
-                name=COLLECTION_NAME,
-                embedding_function=self.embedding_function,
-                metadata={"description": "LEAPP forensic report artifact chunks"}
-            )
-            return True
-        except Exception as e:
-            logger.error(f"Failed to reset collection: {e}")
-            return False
+        except Exception:
+            pass  # Collection may not exist yet
+        self._collection = None
+        self._embed_model = None
+        return True
+
+    def rebuild(self, embed_model: str) -> bool:
+        """Drop the collection so it is recreated with a new embedding model.
+
+        Existing embeddings are dimension-bound to the old model, so a model
+        change requires re-ingesting reports.
+        """
+        logger.info(f"Rebuilding vector store for embedding model: {embed_model}")
+        return self.reset_collection()
 
     def query_chunks(self, query_text: str, job_name: Optional[str] = None, n_results: int = 10) -> List[Dict[str, Any]]:
         """Query chunks from ChromaDB"""
@@ -99,7 +95,7 @@ class ChromaService:
             # Prepare where clause if job_name is specified
             where_clause = {"job_name": job_name} if job_name else None
 
-            results = self.collection.query(
+            results = self._get_collection().query(
                 query_texts=[query_text],
                 n_results=n_results,
                 where=where_clause

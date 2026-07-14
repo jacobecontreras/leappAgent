@@ -1,19 +1,27 @@
 const UploadService = {
-    // Allow user directory selection using electron's API
+    // Native folder picker exposed by pywebview
     async selectDirectory() {
         try {
-            const result = await window.electronAPI.selectDirectory();
-            return JSON.parse(result);
+            await this.waitForPywebview();
+            return await window.pywebview.api.select_folder();
         } catch (error) {
             console.error('Directory selection failed:', error);
             throw error;
         }
     },
 
+    waitForPywebview() {
+        if (window.pywebview) return Promise.resolve();
+        return new Promise((resolve, reject) => {
+            window.addEventListener('pywebviewready', () => resolve(), { once: true });
+            setTimeout(() => reject(new Error('pywebview API unavailable')), 3000);
+        });
+    },
+
     // Send the directory path for processing
     async uploadReport(directoryPath) {
         try {
-            const response = await fetch('http://localhost:8000/upload', {
+            const response = await fetch('/api/upload', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ directory_path: directoryPath })

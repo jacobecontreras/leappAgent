@@ -8,9 +8,6 @@ __pycache__
 
 .DS_Store
 
-# .env
-.env
-
 # venv
 
 backend/venv/
@@ -18,10 +15,12 @@ backend/venv/
 # Logs
 
 *.log
+backend/logs/audit/
 
 # Database
 backend/database/leapp_forensics.db
 backend/database/chroma/
 
-# Node.js
-node_modules/
+# Agent workspaces
+.ai/
+.playwright-mcp/

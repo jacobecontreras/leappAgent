@@ -1,325 +1,120 @@
-class Settings {
-    constructor() {
-        this.apiKeyInput = document.getElementById('apiKeyInput');
-        this.modelSelect = document.getElementById('modelSelect');
-        this.newRuleInput = document.getElementById('newRuleInput');
-        this.addRuleBtn = document.getElementById('addRuleBtn');
-        this.rulesList = document.getElementById('rulesList');
+const Settings = {
+    init() {
+        this.modal = document.getElementById('settingsModal');
+        this.chatModelSelect = document.getElementById('chatModelSelect');
+        this.embedModelSelect = document.getElementById('embedModelSelect');
         this.disableEmbeddingToggle = document.getElementById('disableEmbeddingToggle');
         this.clearDataBtn = document.getElementById('clearDataBtn');
-        this.rules = [];
-        this.apiBase = 'http://localhost:8000';
+        this.status = document.getElementById('settingsStatus');
+        this.clearConfirmPending = false;
 
-        this.init();
-    }
-
-    init() {
-        this.loadSettings();
-        this.attachEventListeners();
-    }
-
-    attachEventListeners() {
-        // Tab switching
-        document.addEventListener('click', (e) => {
-            if (e.target.classList.contains('tab-btn')) {
-                this.switchTab(e.target.dataset.tab);
-            }
+        document.getElementById('settingsButton').addEventListener('click', () => this.open());
+        document.getElementById('settingsCloseBtn').addEventListener('click', () => this.close());
+        this.modal.addEventListener('click', (e) => {
+            if (e.target === this.modal) this.close();
         });
 
-        // Save API key when changed
-        this.apiKeyInput?.addEventListener('input', () => {
-            this.saveApiKey();
-        });
+        this.chatModelSelect.addEventListener('change', () => this.save({ chat_model: this.chatModelSelect.value }));
+        this.embedModelSelect.addEventListener('change', () => this.save({ embed_model: this.embedModelSelect.value }));
+        this.disableEmbeddingToggle.addEventListener('change', () => this.save({ disable_embedding: this.disableEmbeddingToggle.checked }));
+        this.clearDataBtn.addEventListener('click', () => this.clearData());
+    },
 
-        // Save model when changed
-        this.modelSelect?.addEventListener('change', () => {
-            this.saveModel();
-        });
+    async open() {
+        this.modal.classList.remove('hidden');
+        this.setStatus('');
+        await this.load();
+    },
 
-        // Add rule button
-        this.addRuleBtn?.addEventListener('click', () => {
-            this.addRule();
-        });
+    close() {
+        this.modal.classList.add('hidden');
+        this.resetClearConfirm();
+    },
 
-        // Enter key to add rule
-        this.newRuleInput?.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter') {
-                e.preventDefault();
-                this.addRule();
-            }
-        });
+    setStatus(text, isError = false) {
+        this.status.textContent = text;
+        this.status.classList.toggle('error', isError);
+    },
 
-        // Disable embedding toggle
-        this.disableEmbeddingToggle?.addEventListener('change', () => {
-            this.saveDisableEmbedding();
-        });
-
-        // Clear data button
-        this.clearDataBtn?.addEventListener('click', () => {
-            this.clearData();
-        });
-
-        // Rules list event delegation
-        this.rulesList?.addEventListener('click', (e) => {
-            const ruleItem = e.target.closest('.rule-item');
-            if (!ruleItem) return;
-
-            const ruleId = ruleItem.dataset.ruleId;
-
-            if (e.target.closest('.edit-btn')) {
-                this.editRule(ruleId);
-            } else if (e.target.closest('.delete-btn')) {
-                this.deleteRule(ruleId);
-            }
-        });
-    }
-
-    switchTab(tabName) {
-        // Remove active class from all tabs and panes
-        document.querySelectorAll('.tab-btn').forEach(btn => {
-            btn.classList.remove('active');
-        });
-        document.querySelectorAll('.tab-pane').forEach(pane => {
-            pane.classList.remove('active');
-        });
-
-        // Add active class to selected tab and pane
-        document.querySelector(`.tab-btn[data-tab="${tabName}"]`)?.classList.add('active');
-        document.querySelector(`.tab-pane[data-tab="${tabName}"]`)?.classList.add('active');
-    }
-
-    async saveApiKey() {
-        const apiKey = this.apiKeyInput.value.trim();
-
-        const response = await fetch(`${this.apiBase}/settings`, {
-            method: 'PUT',
-            headers: {
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({ api_key: apiKey })
-        });
-
-        if (!response.ok) {
-            throw new Error('Failed to save API key to database');
-        }
-    }
-
-    async saveModel() {
-        const model = this.modelSelect.value;
-
-        const response = await fetch(`${this.apiBase}/settings`, {
-            method: 'PUT',
-            headers: {
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({ model: model })
-        });
-
-        if (!response.ok) {
-            throw new Error('Failed to save model to database');
-        }
-    }
-
-    async saveDisableEmbedding() {
-        const disable = this.disableEmbeddingToggle.checked;
-
-        const response = await fetch(`${this.apiBase}/settings`, {
-            method: 'PUT',
-            headers: {
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({ disable_embedding: disable })
-        });
-
-        if (!response.ok) {
-            throw new Error('Failed to save embedding setting');
-        }
-    }
-
-    async clearData() {
-        if (!confirm('Are you sure you want to delete ALL processed reports and embeddings? This action cannot be undone.')) {
+    populateSelect(select, models, selected, emptyLabel) {
+        select.innerHTML = '';
+        if (!models.length) {
+            const option = document.createElement('option');
+            option.value = '';
+            option.textContent = emptyLabel;
+            select.appendChild(option);
+            select.disabled = true;
             return;
         }
+        select.disabled = false;
+        for (const model of models) {
+            const option = document.createElement('option');
+            option.value = model.name;
+            option.textContent = model.name;
+            option.selected = model.name === selected;
+            select.appendChild(option);
+        }
+    },
+
+    async load() {
+        try {
+            const health = await AIService.getHealth();
+            if (!health.ollama) {
+                this.setStatus('Ollama is not reachable, model settings unavailable.', true);
+            }
+            this.populateSelect(this.chatModelSelect, health.models.filter(m => m.tools_capable),
+                health.chat_model, 'No tool-capable models installed');
+            this.populateSelect(this.embedModelSelect, health.models.filter(m => m.embedding),
+                health.embed_model, 'No embedding models installed');
+
+            const response = await fetch('/api/settings');
+            const data = await response.json();
+            if (data.success) {
+                this.disableEmbeddingToggle.checked = !!data.settings.disable_embedding;
+            }
+        } catch (error) {
+            console.error('Failed to load settings:', error);
+            this.setStatus('Failed to load settings.', true);
+        }
+    },
+
+    async save(settings) {
+        try {
+            const response = await fetch('/api/settings', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(settings)
+            });
+            const data = await response.json();
+            this.setStatus(data.success ? data.message : (data.detail || 'Failed to save settings.'), !data.success);
+        } catch (error) {
+            console.error('Failed to save settings:', error);
+            this.setStatus('Failed to save settings.', true);
+        }
+    },
+
+    resetClearConfirm() {
+        this.clearConfirmPending = false;
+        this.clearDataBtn.textContent = 'Clear Data';
+    },
+
+    // Two-click confirmation: native confirm() dialogs are unreliable in webviews
+    async clearData() {
+        if (!this.clearConfirmPending) {
+            this.clearConfirmPending = true;
+            this.clearDataBtn.textContent = 'Click again to confirm';
+            setTimeout(() => this.resetClearConfirm(), 4000);
+            return;
+        }
+        this.resetClearConfirm();
 
         try {
-            const response = await fetch(`${this.apiBase}/settings/clear-data`, {
-                method: 'POST'
-            });
-
-            if (!response.ok) {
-                throw new Error('Failed to clear data');
-            }
-
-            const result = await response.json();
-            alert(result.message);
-
-            // Optional: Reload page to clear any cached state
-            window.location.reload();
+            const response = await fetch('/api/settings/clear-data', { method: 'POST' });
+            const data = await response.json();
+            this.setStatus(data.success ? 'All data cleared.' : 'Failed to clear data.', !data.success);
         } catch (error) {
-            alert(`Error: ${error.message}`);
+            console.error('Failed to clear data:', error);
+            this.setStatus('Failed to clear data.', true);
         }
     }
-
-    // Rule Management Methods
-    addRule() {
-        const ruleText = this.newRuleInput.value.trim();
-        if (!ruleText) return;
-
-        const rule = {
-            id: Date.now().toString(),
-            text: ruleText,
-            createdAt: new Date().toISOString()
-        };
-
-        this.rules.push(rule);
-        this.saveRules();
-        this.renderRules();
-
-        this.newRuleInput.value = '';
-        this.newRuleInput.focus();
-    }
-
-    editRule(ruleId) {
-        const ruleItem = document.querySelector(`[data-rule-id="${ruleId}"]`);
-        const ruleTextElement = ruleItem.querySelector('.rule-text');
-        const editBtn = ruleItem.querySelector('.edit-btn');
-
-        if (ruleTextElement.contentEditable === 'true') {
-            // Save the edit
-            const newText = ruleTextElement.textContent.trim();
-            const ruleIndex = this.rules.findIndex(r => r.id === ruleId);
-
-            if (ruleIndex !== -1 && newText) {
-                this.rules[ruleIndex].text = newText;
-                this.saveRules();
-            }
-
-            ruleTextElement.contentEditable = 'false';
-            editBtn.innerHTML = '<img src="assets/edit-icon.svg" alt="Edit" class="rule-icon">';
-        } else {
-            // Start editing
-            ruleTextElement.contentEditable = 'true';
-            ruleTextElement.focus();
-
-            // Select all text
-            const range = document.createRange();
-            range.selectNodeContents(ruleTextElement);
-            const selection = window.getSelection();
-            selection.removeAllRanges();
-            selection.addRange(range);
-
-            editBtn.innerHTML = '<img src="assets/save-icon.svg" alt="Save" class="rule-icon">';
-        }
-    }
-
-    deleteRule(ruleId) {
-        this.rules = this.rules.filter(rule => rule.id !== ruleId);
-        this.saveRules();
-        this.renderRules();
-    }
-
-    async saveRules() {
-        const response = await fetch(`${this.apiBase}/settings`, {
-            method: 'PUT',
-            headers: {
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({ rules: this.rules })
-        });
-
-        if (!response.ok) {
-            throw new Error('Failed to save rules to database');
-        }
-    }
-
-    async loadRules() {
-        const response = await fetch(`${this.apiBase}/settings`);
-        if (!response.ok) {
-            throw new Error('Failed to load rules from database');
-        }
-
-        const data = await response.json();
-        this.rules = data.settings.rules || [];
-        this.renderRules();
-    }
-
-    renderRules() {
-        if (!this.rulesList) return;
-
-        if (this.rules.length === 0) {
-            this.rulesList.innerHTML = '<div class="empty-rules">No rules defined yet. Add your first rule above.</div>';
-            return;
-        }
-
-        this.rulesList.innerHTML = this.rules.map(rule => `
-            <div class="rule-item" data-rule-id="${rule.id}">
-                <div class="rule-content">
-                    <p class="rule-text">${this.escapeHtml(rule.text)}</p>
-                </div>
-                <div class="rule-actions">
-                    <button class="rule-btn edit-btn" title="Edit rule">
-                        <img src="assets/edit-icon.svg" alt="Edit" class="rule-icon">
-                    </button>
-                    <button class="rule-btn delete-btn" title="Delete rule">
-                        <img src="assets/delete-icon.svg" alt="Delete" class="rule-icon">
-                    </button>
-                </div>
-            </div>
-        `).join('');
-    }
-
-    escapeHtml(text) {
-        const div = document.createElement('div');
-        div.textContent = text;
-        return div.innerHTML;
-    }
-
-    async loadSettings() {
-        const response = await fetch(`${this.apiBase}/settings`);
-        if (!response.ok) {
-            throw new Error('Failed to load settings from database');
-        }
-
-        const data = await response.json();
-        const settings = data.settings;
-
-        // Load API key
-        if (settings.api_key && this.apiKeyInput) {
-            this.apiKeyInput.value = settings.api_key;
-        }
-
-        // Load selected model
-        if (settings.model && this.modelSelect) {
-            this.modelSelect.value = settings.model;
-        }
-
-        // Load disable embedding setting
-        if (this.disableEmbeddingToggle) {
-            this.disableEmbeddingToggle.checked = settings.disable_embedding || false;
-        }
-
-        // Load rules
-        this.rules = settings.rules || [];
-        this.renderRules();
-    }
-
-    async getApiKey() {
-        const response = await fetch(`${this.apiBase}/settings`);
-        if (!response.ok) {
-            throw new Error('Failed to get API key from database');
-        }
-
-        const data = await response.json();
-        return data.settings.api_key || '';
-    }
-
-    async getSelectedModel() {
-        const response = await fetch(`${this.apiBase}/settings`);
-        if (!response.ok) {
-            throw new Error('Failed to get model from database');
-        }
-
-        const data = await response.json();
-        return data.settings.model || 'glm-4.6';
-    }
-}
+};

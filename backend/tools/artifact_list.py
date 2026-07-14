@@ -1,5 +1,5 @@
 import logging
-from typing import Dict, Any, List
+from typing import Dict, Any
 from database.database import get_db_cursor
 
 from .shared_utils import build_error_response
@@ -8,7 +8,7 @@ logger = logging.getLogger(__name__)
 
 
 def artifact_list(input_data: Dict[str, Any]) -> Dict[str, Any]:
-    """Get list of artifacts for a report."""
+    """List a report's artifacts from its LAVA catalog, grouped by category."""
     job_name = input_data["job_name"]
 
     try:
@@ -25,23 +25,26 @@ def artifact_list(input_data: Dict[str, Any]) -> Dict[str, Any]:
                     available_reports=available_reports
                 )
 
-            # Get artifacts for valid report
-            query = """
-                SELECT DISTINCT at.id, at.file_name, COUNT(ad.row_index) as row_count
-                FROM artifact_types at
-                LEFT JOIN artifact_data ad ON at.id = ad.artifact_type_id AND ad.job_name = ?
-                GROUP BY at.id, at.file_name
-                ORDER BY at.file_name
-            """
-            cursor.execute(query, (job_name,))
+            cursor.execute("""
+                SELECT category, artifact_name, tablename, record_count
+                FROM artifact_catalog
+                WHERE job_name = ?
+                ORDER BY category, artifact_name
+            """, (job_name,))
             rows = cursor.fetchall()
 
-            artifacts = [{"id": row[0], "file_name": row[1], "row_count": row[2]} for row in rows]
+            categories = {}
+            for category, artifact_name, tablename, record_count in rows:
+                categories.setdefault(category, []).append({
+                    "name": artifact_name,
+                    "tablename": tablename,
+                    "record_count": record_count
+                })
 
             return {
                 "success": True,
-                "artifacts": artifacts,
-                "count": len(artifacts)
+                "categories": categories,
+                "artifact_count": len(rows)
             }
 
     except Exception as e:

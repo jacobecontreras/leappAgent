@@ -23,58 +23,47 @@ def init_database():
             report_path TEXT NOT NULL,              -- File system path to the report directory
             upload_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             status TEXT DEFAULT 'processing',      -- processing/completed/failed
-            error_message TEXT                       -- Error details if processing failed
+            error_message TEXT,                      -- Error details if processing failed
+            leapp_version TEXT                       -- LEAPP version from the manifest, if present
         )
     ''')
 
-    # Information about TSV files found in each report
+    # Existing installs created reports before leapp_version existed
+    try:
+        cursor.execute("ALTER TABLE reports ADD COLUMN leapp_version TEXT")
+    except sqlite3.OperationalError:
+        pass
+
+    # Artifact catalog parsed from the report's _lava_data.lava manifest.
+    # The artifact data itself stays in the report's _lava_artifacts.db,
+    # which is only ever opened read-only.
     cursor.execute('''
-        CREATE TABLE IF NOT EXISTS artifact_types (
+        CREATE TABLE IF NOT EXISTS artifact_catalog (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             job_name TEXT NOT NULL,                -- Links to reports table
-            file_name TEXT NOT NULL,               -- Original TSV filename
-            artifact_name TEXT,                    -- Display name (cleaned up filename)
+            category TEXT,                          -- LAVA category (e.g. 'Call History')
+            artifact_name TEXT NOT NULL,           -- Human-readable artifact name
+            tablename TEXT NOT NULL,               -- Table name in _lava_artifacts.db
+            description TEXT,                      -- Module description from manifest meta
+            record_count INTEGER,                  -- Row count reported by the manifest
+            column_map TEXT,                       -- JSON: sanitized column -> human header
+            object_columns TEXT,                   -- JSON: [{name, type}] typed columns (datetime etc.)
+            source_path TEXT,                      -- Original evidence file the artifact came from
             FOREIGN KEY (job_name) REFERENCES reports(job_name) ON DELETE CASCADE,
-            UNIQUE(job_name, file_name)           -- Prevent duplicate files per report
+            UNIQUE(job_name, tablename)
         )
     ''')
 
-    # Actual data rows from TSV files, stored as JSON
+    # SHA-256 manifest of source evidence files hashed at ingest
     cursor.execute('''
-        CREATE TABLE IF NOT EXISTS artifact_data (
+        CREATE TABLE IF NOT EXISTS ingested_files (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             job_name TEXT NOT NULL,                -- Links to reports table
-            artifact_type_id INTEGER NOT NULL,     -- Links to artifact_types table
-            row_index INTEGER NOT NULL,            -- Row number from original TSV
-            data_json TEXT NOT NULL,                -- Row data serialized as JSON
-            FOREIGN KEY (job_name) REFERENCES reports(job_name) ON DELETE CASCADE,
-            FOREIGN KEY (artifact_type_id) REFERENCES artifact_types(id) ON DELETE CASCADE
-        )
-    ''')
-
-    # GPS/location data extracted from KML files
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS spatial_data (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            job_name TEXT NOT NULL,                -- Links to reports table
-            timestamp TEXT,                         -- Time of location event
-            latitude TEXT,                          -- GPS latitude coordinate
-            longitude TEXT,                         -- GPS longitude coordinate
-            activity TEXT,                          -- What was happening at this location
-            source_artifact TEXT,                   -- Which file this data came from
-            FOREIGN KEY (job_name) REFERENCES reports(job_name) ON DELETE CASCADE
-        )
-    ''')
-
-    # Timeline events from Timeline directory files
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS timeline_events (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            job_name TEXT NOT NULL,                -- Links to reports table
-            key TEXT,                               -- Event identifier/unique key
-            activity TEXT,                          -- Event description
-            datalist TEXT,                          -- Additional event information
-            source_artifact TEXT,                   -- Source file for this event
+            file_path TEXT NOT NULL,               -- Absolute path to source file
+            file_name TEXT NOT NULL,               -- Base filename
+            sha256 TEXT NOT NULL,                  -- SHA-256 of file contents at ingest
+            size_bytes INTEGER,                    -- File size at ingest
+            hashed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (job_name) REFERENCES reports(job_name) ON DELETE CASCADE
         )
     ''')
@@ -83,11 +72,18 @@ def init_database():
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS ai_settings (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            setting_key TEXT UNIQUE NOT NULL,       -- 'api_key', 'model', 'rules'
-            setting_value TEXT NOT NULL,            -- Setting value (JSON for rules)
+            setting_key TEXT UNIQUE NOT NULL,       -- 'chat_model', 'embed_model', 'disable_embedding'
+            setting_value TEXT NOT NULL,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+
+    # Remove settings from the pre-Ollama versions of the app
+    cursor.execute("DELETE FROM ai_settings WHERE setting_key IN ('api_key', 'rules', 'model')")
+
+    # Remove tables from the pre-LAVA versions of the app (TSV/timeline copies)
+    for legacy_table in ('artifact_types', 'artifact_data', 'timeline_events'):
+        cursor.execute(f"DROP TABLE IF EXISTS {legacy_table}")
 
     # Save changes and close connection
     conn.commit()
@@ -97,7 +93,7 @@ def reset_database():
     """Reset the database by dropping all tables except ai_settings"""
     with get_db_cursor() as cursor:
         # List of tables to drop
-        tables = ['reports', 'artifact_types', 'artifact_data', 'spatial_data', 'timeline_events']
+        tables = ['reports', 'artifact_catalog', 'ingested_files']
         
         for table in tables:
             cursor.execute(f"DROP TABLE IF EXISTS {table}")
@@ -107,8 +103,9 @@ def reset_database():
     logger.info("Database reset successfully")
 
 def get_db_connection():
-    """Get database connection"""
-    return sqlite3.connect(os.path.join(os.path.dirname(__file__), DB_NAME))
+    """Get database connection (path overridable via LEAPP_DB_PATH for tests)"""
+    db_path = os.environ.get("LEAPP_DB_PATH", os.path.join(os.path.dirname(__file__), DB_NAME))
+    return sqlite3.connect(db_path)
 
 @contextmanager
 def get_db_cursor():
@@ -146,51 +143,44 @@ def update_report_status(job_name: str, status: str, error_message: str = None):
                 (status, job_name)
             )
 
-def store_tsv_data(job_name: str, tsv_data: Dict[str, List[Dict[str, Any]]]):
-    """Store TSV data in database"""
+def set_report_leapp_version(job_name: str, leapp_version: str):
+    """Record the LEAPP version that produced the report, when the manifest provides it"""
     with get_db_cursor() as cursor:
-        for file_name, rows in tsv_data.items():
-            # Clean up filename for display
-            artifact_name = file_name.replace('.tsv', '').replace('_', ' ').title()
-            # Insert artifact type metadata
-            cursor.execute(
-                "INSERT INTO artifact_types (job_name, file_name, artifact_name) VALUES (?, ?, ?)",
-                (job_name, file_name, artifact_name)
-            )
-            artifact_type_id = cursor.lastrowid
+        cursor.execute(
+            "UPDATE reports SET leapp_version = ? WHERE job_name = ?",
+            (leapp_version, job_name)
+        )
 
-            # Store each row as JSON data
-            for row_index, row_data in enumerate(rows):
-                cursor.execute(
-                    "INSERT INTO artifact_data (job_name, artifact_type_id, row_index, data_json) VALUES (?, ?, ?, ?)",
-                    (job_name, artifact_type_id, row_index, json.dumps(row_data))
-                )
-
-        logger.info(f"Stored TSV data for job {job_name}: {len(tsv_data)} files")
-
-def store_spatial_data(job_name: str, spatial_data: List[Dict[str, Any]]):
-    """Store spatial data in database"""
+def store_artifact_catalog(job_name: str, entries: List[Dict[str, Any]]):
+    """Store the artifact catalog parsed from the report's LAVA manifest"""
     with get_db_cursor() as cursor:
-        for data in spatial_data:
-            cursor.execute(
-                "INSERT INTO spatial_data (job_name, timestamp, latitude, longitude, activity, source_artifact) VALUES (?, ?, ?, ?, ?, ?)",
-                (job_name, data.get('timestamp'), data.get('latitude'), data.get('longitude'),
-                 data.get('activity'), data.get('source_artifact'))
-            )
+        for entry in entries:
+            cursor.execute('''
+                INSERT INTO artifact_catalog
+                    (job_name, category, artifact_name, tablename, description,
+                     record_count, column_map, object_columns, source_path)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                job_name,
+                entry.get('category'),
+                entry['name'],
+                entry['tablename'],
+                entry.get('description'),
+                entry.get('record_count'),
+                json.dumps(entry.get('column_map', {})),
+                json.dumps(entry.get('object_columns', [])),
+                entry.get('source_path')
+            ))
 
-        logger.info(f"Stored spatial data for job {job_name}: {len(spatial_data)} locations")
+        logger.info(f"Stored artifact catalog for job {job_name}: {len(entries)} artifacts")
 
-def store_timeline_data(job_name: str, timeline_data: List[Dict[str, Any]]):
-    """Store timeline data in database"""
+def store_ingested_file(job_name: str, file_path: str, sha256: str, size_bytes: int):
+    """Record a source file's hash in the ingest manifest"""
     with get_db_cursor() as cursor:
-        for event in timeline_data:
-            cursor.execute(
-                "INSERT INTO timeline_events (job_name, key, activity, datalist, source_artifact) VALUES (?, ?, ?, ?, ?)",
-                (job_name, event.get('key'), event.get('activity'), event.get('datalist'),
-                 event.get('source_artifact'))
-            )
-
-        logger.info(f"Stored timeline data for job {job_name}: {len(timeline_data)} events")
+        cursor.execute(
+            "INSERT INTO ingested_files (job_name, file_path, file_name, sha256, size_bytes) VALUES (?, ?, ?, ?, ?)",
+            (job_name, file_path, os.path.basename(file_path), sha256, size_bytes)
+        )
 
 # AI Settings Management Functions
 

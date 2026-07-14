@@ -5,10 +5,14 @@ const Chat = {
         this.sendButton = document.getElementById('sendButton');
         this.uploadButton = document.getElementById('uploadButton');
         this.messageInput = document.getElementById('messageInput');
+        this.healthBanner = document.getElementById('healthBanner');
+        this.healthRetryBtn = document.getElementById('healthRetryBtn');
         this.isStreaming = false;
         this.currentResponse = null;
+        this.ollamaReady = false;
 
         this.setupEventListeners();
+        this.checkHealth();
     },
 
     setupEventListeners() {
@@ -20,12 +24,42 @@ const Chat = {
         // Listeners for upload report button
         this.uploadButton.addEventListener('click', () => this.handleUploadReport());
 
-        document.addEventListener('keypress', (e) => {
-            if (e.key === 'Enter' && !e.shiftKey && e.target.id === 'messageInput' && !this.isStreaming) {
+        this.healthRetryBtn.addEventListener('click', () => this.checkHealth());
+
+        this.messageInput.addEventListener('keydown', (e) => {
+            // isComposing: Enter that confirms an IME composition must not send
+            if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && !this.isStreaming) {
                 e.preventDefault();
                 this.handleSendMessage();
             }
         });
+    },
+
+    async checkHealth() {
+        try {
+            const health = await AIService.getHealth();
+            this.ollamaReady = health.ollama && !!health.chat_model;
+            if (!health.ollama) {
+                this.showBanner('Ollama is not reachable. Install Ollama, start it, and pull a model (e.g. "ollama pull qwen3").');
+            } else if (!health.chat_model) {
+                this.showBanner('No tool-capable model installed. Run "ollama pull qwen3" then retry.');
+            } else {
+                this.hideBanner();
+            }
+        } catch (error) {
+            this.ollamaReady = false;
+            this.showBanner('Backend unavailable. Restart the app.');
+        }
+        this.sendButton.disabled = !this.ollamaReady;
+    },
+
+    showBanner(text) {
+        document.getElementById('healthBannerText').textContent = text;
+        this.healthBanner.classList.remove('hidden');
+    },
+
+    hideBanner() {
+        this.healthBanner.classList.add('hidden');
     },
 
     getInputValue() {
@@ -43,29 +77,20 @@ const Chat = {
         }
     },
 
-    showWelcome() {
-        if (this.chatWelcome) {
-            this.chatWelcome.style.display = 'flex';
-        }
-    },
-
-    resetChat() {
-        this.chatMessages.innerHTML = `
-            <div class="chat-welcome" id="chatWelcome">
-                <img src="assets/logo.png" alt="aLEAPP" class="chat-welcome-logo">
-            </div>
-        `;
-        this.chatWelcome = document.getElementById('chatWelcome');
-    },
-
     addUserMessage(text) {
         this.hideWelcome();
         this.chatMessages.appendChild(Message.createUserMessage(text));
     },
 
+    addSystemMessage(text) {
+        this.hideWelcome();
+        this.chatMessages.appendChild(Message.createSystemMessage(text));
+        UIManager.scrollToBottom();
+    },
+
     async handleSendMessage() {
-        const message = this.getInputValue();
-        if (!message) return;
+        const message = this.getInputValue().trim();
+        if (!message || !this.ollamaReady) return;
 
         this.addUserMessage(message);
         this.clearInput();
@@ -74,16 +99,18 @@ const Chat = {
     },
 
     handleStopGeneration() {
+        // Cleanup happens in the settlement handler, which abort() triggers
         if (this.currentResponse?.abort) {
             this.currentResponse.abort();
         }
-        this.clearStreamingState();
-        this.setStreamingState(false);
     },
 
     setStreamingState(isStreaming) {
         this.isStreaming = isStreaming;
         this.sendButton.classList.toggle('stop-button', isStreaming);
+        const label = isStreaming ? 'Stop generating' : 'Send message';
+        this.sendButton.setAttribute('aria-label', label);
+        this.sendButton.title = label;
     },
 
     clearStreamingState() {
@@ -98,8 +125,14 @@ const Chat = {
             if (!selectResult.success) return;
 
             const uploadResult = await UploadService.uploadReport(selectResult.directory_path);
+            if (uploadResult.success) {
+                this.addSystemMessage(`Report upload started (${uploadResult.job_name}). Processing runs in the background.`);
+            } else {
+                this.addSystemMessage(`Upload failed: ${uploadResult.detail || 'invalid LEAPP report directory'}`);
+            }
         } catch (error) {
             console.error('Upload failed:', error);
+            this.addSystemMessage('Upload failed: could not read the selected directory.');
         }
     },
 
@@ -109,47 +142,36 @@ const Chat = {
         this.chatMessages.appendChild(streamingMessage);
         UIManager.scrollToBottom();
 
-        let agentProcessText = '';
-        let finalAnswerText = '';
-
-        try {
-            const response = AIService.sendMessage(
-                message,
-                (responseChunk) => {
-                    if (responseChunk.type === 'agent_process') {
-                        agentProcessText += responseChunk.content;
-                        Message.updateStreamingMessageWithStructuredData(streamingMessage, agentProcessText, finalAnswerText);
-                    } else if (responseChunk.type === 'final_answer_partial') {
-                        finalAnswerText = responseChunk.content;
-                        Message.updateStreamingMessageWithStructuredData(streamingMessage, agentProcessText, finalAnswerText);
-                    } else if (responseChunk.type === 'final_answer') {
-                        finalAnswerText = responseChunk.content;
-                        Message.updateStreamingMessageWithStructuredData(streamingMessage, agentProcessText, finalAnswerText);
-                    }
-
-                    if (UIManager.shouldAutoScroll()) {
-                        UIManager.scrollToBottom();
-                    }
-                },
-                () => {
-                    Message.updateStreamingMessageWithStructuredData(streamingMessage, agentProcessText, finalAnswerText);
-                    this.clearStreamingState();
-                    this.setStreamingState(false);
-                },
-                (error) => {
-                    Message.setErrorMessage(streamingMessage, error);
-                    this.clearStreamingState();
-                    this.setStreamingState(false);
+        const response = AIService.sendMessage(
+            message,
+            (event) => {
+                if (event.type === 'thinking') {
+                    Message.appendThinking(streamingMessage, event.content);
+                } else if (event.type === 'token') {
+                    // Rendering and scrolling are batched inside Message
+                    Message.appendPendingToken(streamingMessage, event.content);
+                    return;
+                } else if (event.type === 'tool_call') {
+                    Message.demotePendingToReasoning(streamingMessage);
+                    Message.addToolChip(streamingMessage, event.call_id, event.name, event.arguments);
+                } else if (event.type === 'tool_result') {
+                    Message.addToolResult(streamingMessage, event.call_id, event.name, event.success);
+                } else if (event.type === 'final') {
+                    Message.setFinal(streamingMessage, event.content);
                 }
-            );
 
-            this.currentResponse = response;
-            await response.promise;
-        } catch (error) {
-            console.error('Error in getAIResponse:', error);
-            Message.setErrorMessage(streamingMessage, 'Sorry, there was an error processing your request.');
-            this.clearStreamingState();
-            this.setStreamingState(false);
-        }
+                if (UIManager.shouldAutoScroll()) {
+                    UIManager.scrollToBottom();
+                }
+            },
+            (result) => {
+                Message.finalizeStream(streamingMessage, result);
+                this.clearStreamingState();
+                this.setStreamingState(false);
+            }
+        );
+
+        this.currentResponse = response;
+        await response.promise;
     }
 };
