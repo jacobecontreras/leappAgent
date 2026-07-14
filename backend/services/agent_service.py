@@ -1,5 +1,7 @@
+import asyncio
 import json
 import logging
+from itertools import count
 from typing import AsyncGenerator, Optional
 
 from tools import execute_tool
@@ -26,11 +28,23 @@ def _event(event_type: str, **payload) -> str:
 
 
 class AgentService:
-    def _run_tool(self, name: str, arguments: dict, job_name: Optional[str],
-                  session_id: str, chat_model: str, stage) -> tuple:
-        """Execute one tool call, audit it, and return (events, result)"""
+    def _begin_tool_call(self, call_id: int, name: str, arguments: dict,
+                         job_name: Optional[str]) -> str:
+        """Build the tool_call event, emitted before execution so the UI can
+        show progress while the tool runs. Injects job_name into arguments."""
         if job_name and "job_name" not in arguments:
             arguments["job_name"] = job_name
+        return _event("tool_call", call_id=call_id, name=name, arguments=arguments)
+
+    async def _run_tool(self, call_id: int, name: str, arguments: dict,
+                        session_id: str, chat_model: str, stage) -> tuple:
+        """Execute one tool call, audit it, and return (tool_result_event, result).
+
+        The tool itself runs synchronously on the event loop; the sleep(0)
+        lets the transport flush the already-yielded tool_call event to the
+        client before the tool blocks the loop.
+        """
+        await asyncio.sleep(0)
 
         audit_logger.log(session_id, chat_model, "tool_call",
                          {"stage": stage, "name": name, "arguments": arguments})
@@ -54,12 +68,9 @@ class AgentService:
                 "embed_model": settings_service.get_embed_model()
             })
 
-        events = [
-            _event("tool_call", name=name, arguments=arguments),
-            _event("tool_result", name=name, success=success,
-                   summary=json.dumps(result, default=str)[:TOOL_RESULT_SUMMARY_LIMIT])
-        ]
-        return events, result
+        event = _event("tool_result", call_id=call_id, name=name, success=success,
+                       summary=json.dumps(result, default=str)[:TOOL_RESULT_SUMMARY_LIMIT])
+        return event, result
 
     def _build_evidence_block(self, question: str, evidence: list, catalog: list) -> str:
         """Serialize executed queries/searches plus source paths for synthesis"""
@@ -99,6 +110,7 @@ class AgentService:
 
         audit_logger.log(session_id, chat_model, "user_message", {"message": prompt})
         history = session_manager.get_context_for_ai(session_id)
+        call_counter = count(1)  # correlates tool_call/tool_result pairs in the UI
 
         try:
             resolved_job = pipeline.resolve_job(job_name)
@@ -128,7 +140,8 @@ class AgentService:
 
             if route is None or route.route == "exploratory":
                 async for event in self._react_loop(prompt, session_id, resolved_job,
-                                                    chat_model, catalog_text, history):
+                                                    chat_model, catalog_text, history,
+                                                    call_counter):
                     yield event
                 return
 
@@ -145,21 +158,25 @@ class AgentService:
             evidence = []
             if route.route == "structured_query":
                 async for event in self._structured_query(prompt, route, resolved_job, session_id,
-                                                          chat_model, history, evidence):
+                                                          chat_model, history, evidence,
+                                                          call_counter):
                     yield event
                 if evidence and evidence[0].get("fallback"):
                     async for event in self._react_loop(prompt, session_id, resolved_job,
-                                                        chat_model, catalog_text, history):
+                                                        chat_model, catalog_text, history,
+                                                        call_counter):
                         yield event
                     return
             else:
                 tool_name = "searchArtifacts" if route.route == "text_search" else "semanticSearch"
                 arg_key = "pattern" if route.route == "text_search" else "query"
                 query_text = route.query_text or prompt
-                events, result = self._run_tool(tool_name, {arg_key: query_text},
-                                                resolved_job, session_id, chat_model, route.route)
-                for event in events:
-                    yield event
+                arguments = {arg_key: query_text}
+                call_id = next(call_counter)
+                yield self._begin_tool_call(call_id, tool_name, arguments, resolved_job)
+                event, result = await self._run_tool(call_id, tool_name, arguments,
+                                               session_id, chat_model, route.route)
+                yield event
                 if result.get("success"):
                     matched = []
                     for r in result.get("results", []):
@@ -192,7 +209,8 @@ class AgentService:
             yield _event("error", message=str(e))
 
     async def _structured_query(self, prompt: str, route, job_name: str, session_id: str,
-                                chat_model: str, history: list, evidence: list) -> AsyncGenerator[str, None]:
+                                chat_model: str, history: list, evidence: list,
+                                call_counter) -> AsyncGenerator[str, None]:
         """Forced describe -> SQL generation -> execute with grounded retry.
 
         Appends successful query results to evidence; appends a fallback marker
@@ -200,10 +218,12 @@ class AgentService:
         """
         describes = []
         for tablename in route.tables:
-            events, result = self._run_tool("describeArtifact", {"tablename": tablename},
-                                            job_name, session_id, chat_model, "schema_link")
-            for event in events:
-                yield event
+            arguments = {"tablename": tablename}
+            call_id = next(call_counter)
+            yield self._begin_tool_call(call_id, "describeArtifact", arguments, job_name)
+            event, result = await self._run_tool(call_id, "describeArtifact", arguments,
+                                           session_id, chat_model, "schema_link")
+            yield event
             if result.get("success"):
                 describes.append(result)
 
@@ -224,10 +244,12 @@ class AgentService:
                 feedback = 'Your previous output was not valid JSON of the form {"sql": "..."}. Return only that JSON.'
                 continue
 
-            events, result = self._run_tool("queryArtifacts", {"sql": sql},
-                                            job_name, session_id, chat_model, "sql")
-            for event in events:
-                yield event
+            arguments = {"sql": sql}
+            call_id = next(call_counter)
+            yield self._begin_tool_call(call_id, "queryArtifacts", arguments, job_name)
+            event, result = await self._run_tool(call_id, "queryArtifacts", arguments,
+                                           session_id, chat_model, "sql")
+            yield event
 
             if not result.get("success"):
                 error = result.get("error", "query failed")
@@ -267,7 +289,8 @@ class AgentService:
             session_manager.add_agent_loop(session_id, prompt, final_answer)
 
     async def _react_loop(self, prompt: str, session_id: str, job_name: str, chat_model: str,
-                          catalog_text: str, history: list) -> AsyncGenerator[str, None]:
+                          catalog_text: str, history: list,
+                          call_counter) -> AsyncGenerator[str, None]:
         """Bounded ReAct fallback for exploratory questions"""
         system = (f"{REACT_SYSTEM_PROMPT}\n\nThe loaded report is '{job_name}'.\n\n"
                   f"ARTIFACT CATALOG:\n{catalog_text}")
@@ -310,15 +333,17 @@ class AgentService:
                 if call_key in seen_calls:
                     result = {"success": False,
                               "error": "repeated_call: identical tool call already made - use the earlier result or answer now"}
-                    yield _event("tool_call", name=name, arguments=arguments)
-                    yield _event("tool_result", name=name, success=False,
+                    call_id = next(call_counter)
+                    yield _event("tool_call", call_id=call_id, name=name, arguments=arguments)
+                    yield _event("tool_result", call_id=call_id, name=name, success=False,
                                  summary=json.dumps(result))
                 else:
                     seen_calls.add(call_key)
-                    events, result = self._run_tool(name, arguments, job_name, session_id,
-                                                    chat_model, iteration)
-                    for event in events:
-                        yield event
+                    call_id = next(call_counter)
+                    yield self._begin_tool_call(call_id, name, arguments, job_name)
+                    event, result = await self._run_tool(call_id, name, arguments, session_id,
+                                                   chat_model, iteration)
+                    yield event
                 # Tool results feed back to the model as role:"tool" messages
                 messages.append({"role": "tool", "tool_name": name,
                                  "content": json.dumps(result, default=str)})

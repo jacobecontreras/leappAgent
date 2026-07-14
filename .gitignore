@@ -20,3 +20,7 @@ backend/logs/audit/
 # Database
 backend/database/leapp_forensics.db
 backend/database/chroma/
+
+# Agent workspaces
+.ai/
+.playwright-mcp/

@@ -1,7 +1,7 @@
 import os
 import logging
 import time
-from parsers.lava_manifest import parse_manifest, LAVA_DB_NAME, LAVA_MANIFEST_NAME
+from parsers.lava_manifest import parse_manifest, find_manifest_path, LAVA_DB_NAME
 from database.database import update_report_status, store_artifact_catalog, store_ingested_file, set_report_leapp_version
 from utils.embedding_utils import embed_job_data
 from utils.hash_utils import sha256_file
@@ -9,25 +9,24 @@ from services.settings_service import settings_service
 
 logger = logging.getLogger(__name__)
 
-# Files a LAVA-format report must contain (iLEAPP v2.x / aLEAPP v3.4+)
-REQUIRED_FILES = [LAVA_DB_NAME, LAVA_MANIFEST_NAME]
-
 
 def validate_leapp_directory(directory_path: str) -> bool:
     """Validate that a directory is a LAVA-format LEAPP report"""
     if not os.path.exists(directory_path):
         return False
 
-    return all(
-        os.path.isfile(os.path.join(directory_path, file_name))
-        for file_name in REQUIRED_FILES
-    )
+    db_path = os.path.join(directory_path, LAVA_DB_NAME)
+    return os.path.isfile(db_path) and find_manifest_path(directory_path) is not None
 
 def hash_report_files(job_name: str, directory_path: str) -> int:
     """Record a SHA-256 manifest of the LAVA evidence files before any parsing"""
+    manifest_path = find_manifest_path(directory_path)
+    if not manifest_path:
+        raise FileNotFoundError(f"No LAVA manifest found in {directory_path}")
+
     source_files = [
-        os.path.join(directory_path, file_name)
-        for file_name in REQUIRED_FILES
+        os.path.join(directory_path, LAVA_DB_NAME),
+        manifest_path,
     ]
 
     for file_path in source_files:

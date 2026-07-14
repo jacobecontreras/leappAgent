@@ -34,10 +34,16 @@ def find_free_port() -> int:
 
 
 def wait_until_ready(url: str, timeout: int):
+    """Poll a cheap liveness URL until the backend accepts connections.
+
+    Do not use /api/health here: that probes Ollama (version/tags/show per model)
+    and can take several seconds over a remote tunnel, exceeding a short HTTP
+    timeout and blocking the window from ever opening.
+    """
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
-            with urllib.request.urlopen(url, timeout=1):
+            with urllib.request.urlopen(url, timeout=2):
                 return
         except OSError:
             time.sleep(0.2)
@@ -55,7 +61,7 @@ def main():
     server_thread.start()
 
     url = f"http://127.0.0.1:{port}"
-    wait_until_ready(f"{url}/api/health", STARTUP_TIMEOUT)
+    wait_until_ready(f"{url}/api/ready", STARTUP_TIMEOUT)
 
     webview.create_window(WINDOW_TITLE, url, js_api=JsApi(), width=1200, height=800)
     webview.start()  # blocks until the window is closed

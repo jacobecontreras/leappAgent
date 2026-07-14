@@ -175,6 +175,13 @@ body {
     color: #ff4d4f;
 }
 
+.stream-note {
+    color: var(--text-secondary);
+    font-size: 13px;
+    font-style: italic;
+    margin-top: 6px;
+}
+
 /* AI Output Styling */
 
 .message-content hr {
@@ -455,6 +462,12 @@ body {
 
 .tool-result.failure {
     color: #ff4d4f;
+}
+
+.tool-result.running {
+    color: var(--text-secondary);
+    font-weight: normal;
+    font-style: italic;
 }
 
 /* Settings Modal */

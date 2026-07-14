@@ -15,6 +15,12 @@ def test_validate_lava_report(tmp_path):
     assert validate_leapp_directory(str(tmp_path)) is True
 
 
+def test_validate_json_manifest(tmp_path):
+    make_lava_report(tmp_path)
+    (tmp_path / "_lava_data.lava").rename(tmp_path / "_lava_data.json")
+    assert validate_leapp_directory(str(tmp_path)) is True
+
+
 def test_validate_missing_manifest(tmp_path):
     make_lava_report(tmp_path)
     (tmp_path / "_lava_data.lava").unlink()
@@ -85,6 +91,28 @@ def test_process_report_hashes_and_stores_catalog(tmp_db, tmp_path, monkeypatch)
     assert call_history[4] == 3
     assert json.loads(call_history[5])["phone_number"] == "Phone Number"
     assert {"name": "starting_timestamp", "type": "datetime"} in json.loads(call_history[6])
+
+
+def test_process_report_accepts_json_manifest(tmp_db, tmp_path, monkeypatch):
+    make_lava_report(tmp_path)
+    (tmp_path / "_lava_data.lava").rename(tmp_path / "_lava_data.json")
+    settings_service.set_disable_embedding(True)
+    monkeypatch.setattr(processing_utils, "embed_job_data", lambda job: None)
+
+    insert_report_metadata("job_json", str(tmp_path))
+    process_leapp_report("job_json", str(tmp_path))
+
+    with get_db_cursor() as cursor:
+        cursor.execute("SELECT file_name FROM ingested_files WHERE job_name = 'job_json'")
+        hashed = {row[0] for row in cursor.fetchall()}
+        cursor.execute("SELECT status FROM reports WHERE job_name = 'job_json'")
+        status = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM artifact_catalog WHERE job_name = 'job_json'")
+        catalog_count = cursor.fetchone()[0]
+
+    assert status == "completed"
+    assert hashed == {"_lava_artifacts.db", "_lava_data.json"}
+    assert catalog_count == 2
 
 
 def test_embedding_gated_by_setting(tmp_db, tmp_path, monkeypatch):

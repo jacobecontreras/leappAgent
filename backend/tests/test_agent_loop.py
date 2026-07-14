@@ -133,6 +133,44 @@ async def test_react_repeated_call_short_circuits(agent, monkeypatch):
     assert "repeated_call" in fourth_messages[-1]["content"]
     assert events[-1]["content"] == "done"
 
+    # Both branches carry correlated call_ids, including the short-circuit
+    tool_calls = [e for e in events if e["type"] == "tool_call"]
+    assert [c["call_id"] for c in tool_calls] == [1, 2]
+    assert [r["call_id"] for r in tool_results] == [1, 2]
+
+
+async def test_tool_call_event_emitted_before_execution(agent, monkeypatch):
+    """The tool_call event must be yielded before the tool runs so the UI can
+    show progress during long tools, and call_id must match across the pair."""
+    execution_order = []
+
+    real_run_tool = AgentService._run_tool
+
+    async def tracking_run_tool(self, call_id, name, arguments, session_id, chat_model, stage):
+        execution_order.append(("execute", name))
+        return await real_run_tool(self, call_id, name, arguments, session_id, chat_model, stage)
+
+    monkeypatch.setattr(AgentService, "_run_tool", tracking_run_tool)
+    use_fake_client(monkeypatch, [
+        exploratory_turn(),
+        tool_call_turn("viewReportList", {}, content="Checking."),
+        content_turn("done")
+    ])
+
+    events = []
+    agent_gen = agent.process_agent_message("explore", "s-order")
+    async for raw in agent_gen:
+        event = json.loads(raw)
+        events.append(event)
+        if event["type"] == "tool_call":
+            # The tool_call event arrived before the tool executed
+            assert execution_order == []
+
+    assert execution_order == [("execute", "viewReportList")]
+    tool_call = next(e for e in events if e["type"] == "tool_call")
+    tool_result = next(e for e in events if e["type"] == "tool_result")
+    assert tool_call["call_id"] == tool_result["call_id"] == 1
+
 
 async def test_stream_error_yields_error_event(agent, monkeypatch):
     class BrokenClient:

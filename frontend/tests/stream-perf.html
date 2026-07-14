@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Stream perf harness</title>
+<style>
+    body { font-family: monospace; background: #222; color: #ddd; padding: 20px; }
+    .pass { color: #6c6; }
+    .fail { color: #f66; font-weight: bold; }
+    #summary { font-size: 16px; margin-bottom: 12px; white-space: pre-line; }
+    #chat { height: 300px; overflow-y: auto; border: 1px solid #444; padding: 10px; }
+</style>
+</head>
+<body>
+<div id="summary">Running...</div>
+<div id="chat"></div>
+
+<script src="../vendor/marked.min.js"></script>
+<script src="../vendor/purify.min.js"></script>
+<script src="../components/Message.js"></script>
+<script>
+// Real scrolling against the harness container so autoscroll's forced layout
+// is included in the measurement
+const chat = document.getElementById('chat');
+const UIManager = {
+    shouldAutoScroll: () => true,
+    scrollToBottom: () => { chat.scrollTo({ top: chat.scrollHeight }); }
+};
+
+// Canned response ≥30 KB: prose, fenced code, and a large table
+function buildResponse() {
+    let md = '# Analysis of extracted messages\n\n';
+    for (let s = 0; s < 12; s++) {
+        md += `## Section ${s + 1}\n\nThe artifact contains **notable** entries with *mixed* content and [links](https://example.com/${s}).\n\n`;
+        md += '```sql\nSELECT m.id, m.sender, m.timestamp, m.body\nFROM messages m\nJOIN contacts c ON c.id = m.sender\nWHERE m.timestamp BETWEEN "2026-01-01" AND "2026-02-01"\nORDER BY m.timestamp DESC;\n```\n\n';
+        md += '| id | sender | timestamp | preview |\n|---|---|---|---|\n';
+        for (let r = 0; r < 40; r++) {
+            md += `| ${s * 40 + r} | user_${r % 7} | 2026-01-${(r % 28) + 1} 12:${r % 60} | message body preview text row ${r} |\n`;
+        }
+        md += '\n';
+    }
+    return md;
+}
+
+// Instrument the render tick
+const ticks = [];
+const origRender = Message._renderPending.bind(Message);
+Message._renderPending = function (el, state) {
+    const t0 = performance.now();
+    origRender(el, state);
+    ticks.push(performance.now() - t0);
+};
+
+// Long-task observation with rAF-gap fallback for engines without it
+let longTasks = [];
+let observerSupported = false;
+try {
+    if (PerformanceObserver.supportedEntryTypes?.includes('longtask')) {
+        observerSupported = true;
+        new PerformanceObserver(list => longTasks.push(...list.getEntries().map(e => e.duration)))
+            .observe({ entryTypes: ['longtask'] });
+    }
+} catch (e) { /* fall through to rAF gaps */ }
+
+const rafGaps = [];
+let lastFrame = null, rafRunning = true;
+function frameLoop(t) {
+    if (lastFrame !== null) rafGaps.push(t - lastFrame);
+    lastFrame = t;
+    if (rafRunning) requestAnimationFrame(frameLoop);
+}
+requestAnimationFrame(frameLoop);
+
+async function replay(markdown, tokenSize, delayMs, label) {
+    const el = Message.createStreamingMessage();
+    chat.replaceChildren(el);
+    ticks.length = 0;
+
+    const t0 = performance.now();
+    for (let i = 0; i < markdown.length; i += tokenSize) {
+        Message.appendPendingToken(el, markdown.slice(i, i + tokenSize));
+        if (delayMs > 0) {
+            await new Promise(r => setTimeout(r, delayMs));
+        } else if ((i / tokenSize) % 50 === 0) {
+            await new Promise(r => setTimeout(r, 0)); // yield so render ticks can fire
+        }
+    }
+    // allow the last scheduled tick, then terminal render
+    await new Promise(r => setTimeout(r, 150));
+    Message.setFinal(el, markdown);
+    const total = performance.now() - t0;
+
+    const mean = ticks.reduce((a, b) => a + b, 0) / (ticks.length || 1);
+    const max = Math.max(0, ...ticks);
+    return { label, total, tickCount: ticks.length, mean, max };
+}
+
+async function main() {
+    const md = buildResponse();
+    const sizeKB = (md.length / 1024).toFixed(1);
+
+    // Accelerated replay: full document as fast as the render cadence allows
+    const fast = await replay(md, 4, 0, 'accelerated');
+    // Realistic-cadence spot check on a slice (~30 tokens/s), kept short
+    const slow = await replay(md.slice(0, 4000), 4, 33, 'realistic 30 tok/s');
+
+    rafRunning = false;
+    const badGaps = rafGaps.filter(g => g > 100).length;
+    const maxGap = Math.max(0, ...rafGaps).toFixed(0);
+
+    // Budget gates: per-tick max in both modes, mean at realistic cadence,
+    // and no frame gaps over 100 ms. The accelerated mean is reported but not
+    // gated: every accelerated tick parses a near-full document, which does
+    // not represent per-tick cost in a real stream.
+    const ok = fast.max < 50 && slow.max < 50 && slow.mean < 8 && badGaps === 0;
+    const lines = [
+        `${ok ? 'PASS' : 'FAIL'} (budget: max < 50 ms per tick, realistic mean < 8 ms, no rAF gap > 100 ms)`,
+        `response size: ${sizeKB} KB`,
+        `${fast.label}: ${fast.tickCount} ticks, mean ${fast.mean.toFixed(1)} ms, max ${fast.max.toFixed(1)} ms, total ${(fast.total / 1000).toFixed(1)} s`,
+        `${slow.label}: ${slow.tickCount} ticks, mean ${slow.mean.toFixed(1)} ms, max ${slow.max.toFixed(1)} ms`,
+        observerSupported
+            ? `longtask observer: supported, ${longTasks.length} long tasks (max ${Math.max(0, ...longTasks).toFixed(0)} ms)`
+            : `longtask observer: NOT supported - rAF gap fallback in use`,
+        `rAF gaps > 100 ms: ${badGaps} (max gap ${maxGap} ms)`
+    ];
+    const summary = document.getElementById('summary');
+    summary.textContent = lines.join('\n');
+    summary.className = ok ? 'pass' : 'fail';
+    document.title = (ok ? 'PASS ' : 'FAIL ') + 'Stream perf harness';
+}
+main();
+</script>
+</body>
+</html>

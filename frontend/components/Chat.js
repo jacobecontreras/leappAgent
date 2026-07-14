@@ -26,8 +26,9 @@ const Chat = {
 
         this.healthRetryBtn.addEventListener('click', () => this.checkHealth());
 
-        document.addEventListener('keypress', (e) => {
-            if (e.key === 'Enter' && !e.shiftKey && e.target.id === 'messageInput' && !this.isStreaming) {
+        this.messageInput.addEventListener('keydown', (e) => {
+            // isComposing: Enter that confirms an IME composition must not send
+            if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && !this.isStreaming) {
                 e.preventDefault();
                 this.handleSendMessage();
             }
@@ -88,7 +89,7 @@ const Chat = {
     },
 
     async handleSendMessage() {
-        const message = this.getInputValue();
+        const message = this.getInputValue().trim();
         if (!message || !this.ollamaReady) return;
 
         this.addUserMessage(message);
@@ -98,16 +99,18 @@ const Chat = {
     },
 
     handleStopGeneration() {
+        // Cleanup happens in the settlement handler, which abort() triggers
         if (this.currentResponse?.abort) {
             this.currentResponse.abort();
         }
-        this.clearStreamingState();
-        this.setStreamingState(false);
     },
 
     setStreamingState(isStreaming) {
         this.isStreaming = isStreaming;
         this.sendButton.classList.toggle('stop-button', isStreaming);
+        const label = isStreaming ? 'Stop generating' : 'Send message';
+        this.sendButton.setAttribute('aria-label', label);
+        this.sendButton.title = label;
     },
 
     clearStreamingState() {
@@ -139,45 +142,36 @@ const Chat = {
         this.chatMessages.appendChild(streamingMessage);
         UIManager.scrollToBottom();
 
-        try {
-            const response = AIService.sendMessage(
-                message,
-                (event) => {
-                    if (event.type === 'thinking') {
-                        Message.appendThinking(streamingMessage, event.content);
-                    } else if (event.type === 'token') {
-                        Message.appendPendingToken(streamingMessage, event.content);
-                    } else if (event.type === 'tool_call') {
-                        Message.demotePendingToReasoning(streamingMessage);
-                        Message.addToolChip(streamingMessage, event.name, event.arguments);
-                    } else if (event.type === 'tool_result') {
-                        Message.addToolResult(streamingMessage, event.name, event.success);
-                    } else if (event.type === 'final') {
-                        Message.setFinal(streamingMessage, event.content);
-                    }
-
-                    if (UIManager.shouldAutoScroll()) {
-                        UIManager.scrollToBottom();
-                    }
-                },
-                () => {
-                    this.clearStreamingState();
-                    this.setStreamingState(false);
-                },
-                (error) => {
-                    Message.setErrorMessage(streamingMessage, error);
-                    this.clearStreamingState();
-                    this.setStreamingState(false);
+        const response = AIService.sendMessage(
+            message,
+            (event) => {
+                if (event.type === 'thinking') {
+                    Message.appendThinking(streamingMessage, event.content);
+                } else if (event.type === 'token') {
+                    // Rendering and scrolling are batched inside Message
+                    Message.appendPendingToken(streamingMessage, event.content);
+                    return;
+                } else if (event.type === 'tool_call') {
+                    Message.demotePendingToReasoning(streamingMessage);
+                    Message.addToolChip(streamingMessage, event.call_id, event.name, event.arguments);
+                } else if (event.type === 'tool_result') {
+                    Message.addToolResult(streamingMessage, event.call_id, event.name, event.success);
+                } else if (event.type === 'final') {
+                    Message.setFinal(streamingMessage, event.content);
                 }
-            );
 
-            this.currentResponse = response;
-            await response.promise;
-        } catch (error) {
-            console.error('Error in getAIResponse:', error);
-            Message.setErrorMessage(streamingMessage, 'Sorry, there was an error processing your request.');
-            this.clearStreamingState();
-            this.setStreamingState(false);
-        }
+                if (UIManager.shouldAutoScroll()) {
+                    UIManager.scrollToBottom();
+                }
+            },
+            (result) => {
+                Message.finalizeStream(streamingMessage, result);
+                this.clearStreamingState();
+                this.setStreamingState(false);
+            }
+        );
+
+        this.currentResponse = response;
+        await response.promise;
     }
 };

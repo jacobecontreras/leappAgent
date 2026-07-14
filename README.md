@@ -50,7 +50,7 @@ backend/venv/bin/python app.py
 
 The app opens a native window, detects installed Ollama models, and picks sensible defaults (changeable in settings). Upload an aLEAPP/iLEAPP report directory and start asking questions.
 
-Reports must be in the LAVA format (containing `_lava_artifacts.db` and `_lava_data.lava`), which iLEAPP v2.x and aLEAPP v3.4+ produce by default. Older TSV-only reports are not supported.
+Reports must be in the LAVA format (containing `_lava_artifacts.db` and `_lava_data.lava` or `_lava_data.json`), which iLEAPP v2.x and aLEAPP v3.4+ produce by default. Older TSV-only reports are not supported.
 
 Note: on Linux, pywebview needs the system webview packages (`python3-gi` and WebKit2GTK via your package manager).
 

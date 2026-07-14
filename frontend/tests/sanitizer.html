@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Sanitizer harness</title>
+<style>
+    body { font-family: monospace; background: #222; color: #ddd; padding: 20px; }
+    .pass { color: #6c6; }
+    .fail { color: #f66; font-weight: bold; }
+    #summary { font-size: 16px; margin-bottom: 12px; }
+    li { margin: 2px 0; }
+</style>
+</head>
+<body>
+<div id="summary">Running...</div>
+<ul id="results"></ul>
+
+<script src="../vendor/marked.min.js"></script>
+<script src="../vendor/purify.min.js"></script>
+<script src="../components/Message.js"></script>
+<script>
+const results = [];
+
+function renderToDiv(markdown) {
+    const div = document.createElement('div');
+    Message.renderInto(div, markdown);
+    return div;
+}
+
+// check(name, markdown, assertFn) - assertFn receives the rendered container
+function check(name, markdown, assertFn) {
+    let ok = false, detail = '';
+    try {
+        const div = renderToDiv(markdown);
+        ok = assertFn(div);
+        detail = ok ? '' : ' -- got: ' + div.innerHTML.slice(0, 200);
+    } catch (e) {
+        detail = ' -- threw: ' + e.message;
+    }
+    results.push({ name, ok, detail });
+}
+
+const noActiveContent = div =>
+    !div.querySelector('script, svg, math, style, form, input, img, iframe, object, embed') &&
+    ![...div.querySelectorAll('*')].some(el =>
+        [...el.attributes].some(a => a.name.startsWith('on') || a.name === 'style' ||
+                                     a.name.startsWith('data-') || a.name === 'id' || a.name === 'name'));
+
+// A link is safe if its hostile href was stripped (inert anchor) or is an allowed scheme
+const noBadLinks = div =>
+    [...div.querySelectorAll('a')].every(a => {
+        const href = a.getAttribute('href');
+        return href === null || /^(?:https?:|mailto:)/i.test(href);
+    });
+
+// --- Negative cases: hostile payloads must be inert ---
+check('img onerror handler', '<img src=x onerror="window.__pwned=1">',
+    div => noActiveContent(div) && !window.__pwned);
+check('onclick attribute', '<p onclick="window.__pwned=1">hi</p>',
+    div => noActiveContent(div));
+check('javascript: link', '[click](javascript:alert(1))', noBadLinks);
+check('mixed-case JaVaScRiPt: link', '[click](JaVaScRiPt:alert(1))', noBadLinks);
+check('tab-obfuscated java\\tscript: link', '[click](java\tscript:alert(1))', noBadLinks);
+check('data: URL link', '[click](data:text/html,<script>alert(1)<\/script>)', noBadLinks);
+check('protocol-relative //evil link', '[click](//evil.example)', noBadLinks);
+check('relative URL link', '[click](/local/path)', noBadLinks);
+check('svg onload', '<svg onload="window.__pwned=1"></svg>', noActiveContent);
+check('MathML', '<math><mi href="javascript:alert(1)">x</mi></math>',
+    div => !div.querySelector('math, mi'));
+check('style tag CSS redressing', '<style>body{display:none}</style>hi',
+    div => noActiveContent(div) && div.textContent.includes('hi'));
+check('style attribute', '<p style="position:fixed;inset:0">overlay</p>', noActiveContent);
+check('form UI elements', '<form action="https://evil.example"><input value="x"><button>go</button></form>',
+    div => !div.querySelector('form, input, button'));
+check('DOM clobbering via name', '<a name="body">x</a>', noActiveContent);
+check('DOM clobbering via id', '<p id="location">x</p>', noActiveContent);
+// GHSA-cmwh-pvxp-8882 preconditions (setConfig + allowlist-mutating attribute hook)
+// are absent from our per-call, hook-free usage; representative payload still asserted inert:
+check('advisory: is-allowed attribute smuggling', '<a is="x" href="javascript:alert(1)">x</a>',
+    div => noActiveContent(div) && noBadLinks(div));
+// CVE-2026-47423: published selectedcontent re-clone bypass payload (patched 3.4.5;
+// our allowlist additionally excludes select/button/option/selectedcontent/img)
+check('advisory CVE-2026-47423: selectedcontent re-clone',
+    '<select><button><selectedcontent></selectedcontent></button><option selected=javascript:1><img src=x onerror=alert(1)>x</option></select>',
+    div => !div.querySelector('select, button, option, selectedcontent, img') && noActiveContent(div));
+// 3.4.0 mXSS re-contextualization / closing-tag advisory payloads:
+check('mXSS: form re-contextualization', '<form><math><mtext></form><form><mglyph><style></math><img src onerror="window.__pwned=1">',
+    div => noActiveContent(div) && !window.__pwned);
+check('mXSS: closing-tag confusion', '<svg></p><style><a id="</style><img src=x onerror=window.__pwned=1>">',
+    div => noActiveContent(div) && !window.__pwned);
+
+// --- Positive cases: legitimate marked output must survive ---
+check('bold/italic/heading', '# Title\n\n**bold** and *italic*',
+    div => div.querySelector('h1') && div.querySelector('strong') && div.querySelector('em'));
+check('fenced code block', '```sql\nSELECT * FROM messages;\n```',
+    div => div.querySelector('pre code') && div.textContent.includes('SELECT * FROM messages;'));
+check('table', '| a | b |\n|---|---|\n| 1 | 2 |',
+    div => div.querySelector('table') && div.querySelectorAll('td').length === 2);
+check('https link kept + hardened', '[site](https://example.com)',
+    div => {
+        const a = div.querySelector('a');
+        return a && a.getAttribute('href') === 'https://example.com' &&
+               a.getAttribute('target') === '_blank' &&
+               a.getAttribute('rel') === 'noopener noreferrer';
+    });
+check('mailto link kept', '[mail](mailto:a@b.c)',
+    div => div.querySelector('a[href^="mailto:"]'));
+check('ordered list with start', '3. three\n4. four',
+    div => div.querySelector('ol') && div.querySelectorAll('li').length === 2);
+check('blockquote and hr', '> quoted\n\n---',
+    div => div.querySelector('blockquote') && div.querySelector('hr'));
+
+// --- Repeated render: no state accumulation, link hardening stays exact ---
+(function () {
+    const input = '[a](https://x.example) and **b**\n\n| c |\n|---|\n| d |';
+    const first = renderToDiv(input).innerHTML;
+    let stable = true, linksOk = true;
+    for (let i = 0; i < 100; i++) {
+        const div = renderToDiv(input);
+        if (div.innerHTML !== first) stable = false;
+        const hardened = [...div.querySelectorAll('[target], [rel]')];
+        if (!(hardened.length && hardened.every(el => el.tagName === 'A'))) linksOk = false;
+    }
+    results.push({ name: 'repeated render x100 stable', ok: stable, detail: '' });
+    results.push({ name: 'link hardening on <a> only, every render', ok: linksOk, detail: '' });
+})();
+
+// --- Fail-closed: unsupported engine falls back to plain text ---
+(function () {
+    const saved = Object.getOwnPropertyDescriptor(DOMPurify, 'isSupported');
+    Object.defineProperty(DOMPurify, 'isSupported', { value: false, configurable: true });
+    const div = renderToDiv('<img src=x onerror="window.__pwned=1"> **not parsed**');
+    const ok = !div.querySelector('*') && div.textContent.includes('**not parsed**') && !window.__pwned;
+    if (saved) Object.defineProperty(DOMPurify, 'isSupported', saved);
+    results.push({ name: 'fail closed when isSupported=false (textContent fallback)', ok, detail: ok ? '' : div.innerHTML.slice(0, 200) });
+})();
+
+// --- Report ---
+const ul = document.getElementById('results');
+let passed = 0;
+for (const r of results) {
+    const li = document.createElement('li');
+    li.className = r.ok ? 'pass' : 'fail';
+    li.textContent = (r.ok ? 'PASS ' : 'FAIL ') + r.name + r.detail;
+    ul.appendChild(li);
+    if (r.ok) passed++;
+}
+const summary = document.getElementById('summary');
+summary.textContent = `${passed}/${results.length} passed`;
+summary.className = passed === results.length ? 'pass' : 'fail';
+document.title = (passed === results.length ? 'PASS ' : 'FAIL ') + 'Sanitizer harness';
+</script>
+</body>
+</html>

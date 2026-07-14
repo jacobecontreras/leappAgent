@@ -1,0 +1,15 @@
+DOMPurify 3.4.12
+Source: https://github.com/cure53/DOMPurify/releases/download/3.4.12/purify.min.js
+Released: 2026-07-11
+SHA-256: c45ba939765574f96cbf35ee9b6d89f73756a17921814425e74b82f7c54603ce
+Vendored: 2026-07-13
+
+Advisory audit at vendoring time:
+- GHSA-cmwh-pvxp-8882 (affects <= 3.4.10, patched 3.4.11): included in this release.
+  Preconditions (setConfig() plus attribute hook mutating the shared allowlist)
+  are additionally absent from our usage: per-call config, no hooks.
+- CVE-2026-47423 (selectedcontent re-clone bypass, patched 3.4.5): included in this
+  release; the published payload is exercised in frontend/tests/sanitizer.html, and the
+  app's allowlist excludes select/button/option/selectedcontent entirely.
+- 3.4.0 mXSS re-contextualization fixes: included; regression payloads exercised in
+  frontend/tests/sanitizer.html.

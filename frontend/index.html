@@ -36,7 +36,7 @@
                         <img src="assets/attachment.svg" alt="Upload" class="upload-icon">
                         <span>Upload report</span>
                     </button>
-                    <button id="sendButton" class="send-button">
+                    <button id="sendButton" class="send-button" aria-label="Send message" title="Send message">
                         <img src="assets/send-arrow.svg" alt="Send" class="send-icon">
                         <img src="assets/stop-icon.svg" alt="Stop" class="stop-icon">
                     </button>
@@ -90,6 +90,7 @@
     </div>
 
     <script src="vendor/marked.min.js"></script>
+    <script src="vendor/purify.min.js"></script>
     <script src="utils/UIManager.js"></script>
     <script src="services/AIService.js"></script>
     <script src="services/UploadService.js"></script>

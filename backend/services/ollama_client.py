@@ -1,5 +1,6 @@
 import json
 import logging
+import asyncio
 import httpx
 from dataclasses import dataclass, field
 from typing import AsyncGenerator, List, Optional
@@ -119,10 +120,11 @@ async def resolve_default_models(client: OllamaClient) -> dict:
     where models is [{"name", "tools_capable", "embedding"}].
     """
     installed = await client.list_models()
+    names = [m.get("name", "") for m in installed]
+    caps_list = await asyncio.gather(*(client.model_capabilities(name) for name in names))
+
     models = []
-    for m in installed:
-        name = m.get("name", "")
-        capabilities = await client.model_capabilities(name)
+    for name, capabilities in zip(names, caps_list):
         models.append({
             "name": name,
             "tools_capable": "tools" in capabilities,

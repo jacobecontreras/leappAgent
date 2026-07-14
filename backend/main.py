@@ -37,6 +37,12 @@ class SettingsRequest(BaseModel):
     disable_embedding: Optional[bool] = None
 
 
+@app.get("/api/ready")
+async def ready():
+    """Cheap liveness check for app startup — does not probe Ollama"""
+    return {"ready": True}
+
+
 @app.get("/api/health")
 async def health():
     """Report Ollama reachability and installed models; resolve default models on first run"""
@@ -74,7 +80,7 @@ async def health():
 @app.post("/api/upload")
 async def upload_report(request: UploadRequest):
     if not validate_leapp_directory(request.directory_path):
-        raise HTTPException(status_code=400, detail="Invalid LEAPP report directory: _lava_artifacts.db / _lava_data.lava not found (requires iLEAPP v2.x or aLEAPP v3.4+ output)")
+        raise HTTPException(status_code=400, detail="Invalid LEAPP report directory: _lava_artifacts.db and _lava_data.lava (or _lava_data.json) not found (requires iLEAPP v2.x or aLEAPP v3.4+ output)")
 
     job_name = f"report_{int(time.time())}"
     insert_report_metadata(job_name, request.directory_path)

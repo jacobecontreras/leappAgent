@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Terminal matrix harness</title>
+<style>
+    body { font-family: monospace; background: #222; color: #ddd; padding: 20px; }
+    .pass { color: #6c6; }
+    .fail { color: #f66; font-weight: bold; }
+    #summary { font-size: 16px; margin-bottom: 12px; }
+    li { margin: 2px 0; }
+    #work { position: absolute; left: -9999px; }
+</style>
+</head>
+<body>
+<div id="summary">Running...</div>
+<ul id="results"></ul>
+<div id="work"></div>
+
+<script src="../vendor/marked.min.js"></script>
+<script src="../vendor/purify.min.js"></script>
+<script src="../components/Message.js"></script>
+<script src="../services/AIService.js"></script>
+<script>
+// Surface any uncaught failure in the page verdict instead of hanging silently
+window.onerror = (msg, src, line) => {
+    document.title = 'FAIL Terminal matrix harness';
+    document.getElementById('summary').textContent = `Uncaught: ${msg} @ ${src}:${line}`;
+    document.getElementById('summary').className = 'fail';
+};
+window.onunhandledrejection = (e) => {
+    document.title = 'FAIL Terminal matrix harness';
+    document.getElementById('summary').textContent = `Unhandled rejection: ${e.reason}`;
+    document.getElementById('summary').className = 'fail';
+};
+
+// UIManager stub: Message's render path calls these
+const UIManager = { shouldAutoScroll: () => false, scrollToBottom: () => {} };
+
+const enc = new TextEncoder();
+const results = [];
+const realFetch = window.fetch;
+
+// Build a fetch stub that streams the given chunks. Honors the abort signal
+// the way real fetch does (pending read rejects with AbortError).
+// chunks: array of strings/Uint8Arrays, or the token 'HOLD' to keep the
+// stream open until abort.
+// chunks may also contain the tokens 'HOLD' (keep the stream open until abort)
+// and 'BREAK' (error the stream, making reader.read() reject mid-stream).
+function stubFetch(chunks, opts = {}) {
+    window.fetch = (url, init) => {
+        if (opts.reject) return Promise.reject(new TypeError(opts.reject));
+        let streamController;
+        const stream = new ReadableStream({
+            start(c) {
+                streamController = c;
+                (async () => {
+                    for (const chunk of chunks) {
+                        if (chunk === 'HOLD') return; // stay open
+                        if (chunk === 'BREAK') { c.error(new TypeError('connection reset')); return; }
+                        await new Promise(r => setTimeout(r, opts.delayMs ?? 2));
+                        c.enqueue(typeof chunk === 'string' ? enc.encode(chunk) : chunk);
+                    }
+                    c.close();
+                })();
+            }
+        });
+        init.signal.addEventListener('abort', () => {
+            try { streamController.error(new DOMException('Aborted', 'AbortError')); } catch (e) {}
+        });
+        return Promise.resolve({ ok: true, body: stream });
+    };
+}
+
+const ev = (obj) => `data: ${JSON.stringify(obj)}\n\n`;
+
+// Runs one scenario through AIService + Message exactly as Chat wires them.
+// Returns collected facts for assertions.
+async function run(chunks, opts = {}) {
+    window.__stage = 'run:start #' + results.length;
+    stubFetch(chunks, opts);
+    const el = Message.createStreamingMessage();
+    document.getElementById('work').appendChild(el);
+
+    const settles = [];
+    let isStreaming = true;
+
+    const response = AIService.sendMessage('q',
+        (event) => {
+            if (event.type === 'token') Message.appendPendingToken(el, event.content);
+            else if (event.type === 'thinking') Message.appendThinking(el, event.content);
+            else if (event.type === 'tool_call') { Message.demotePendingToReasoning(el); Message.addToolChip(el, event.call_id, event.name, event.arguments); }
+            else if (event.type === 'tool_result') Message.addToolResult(el, event.call_id, event.name, event.success);
+            else if (event.type === 'final') Message.setFinal(el, event.content);
+        },
+        (result) => {
+            settles.push(result);
+            Message.finalizeStream(el, result);
+            isStreaming = false;
+        });
+
+    if (opts.abortAfterMs !== undefined) {
+        setTimeout(() => response.abort(), opts.abortAfterMs);
+    }
+    window.__stage = 'run:awaiting #' + results.length;
+    const resolved = await response.promise;
+    window.__stage = 'run:settled #' + results.length;
+
+    // Post-settlement quiescence: any stray queued tick must not mutate the DOM
+    const htmlAtSettle = el.innerHTML;
+    await new Promise(r => setTimeout(r, 300));
+    const mutatedAfterSettle = el.innerHTML !== htmlAtSettle;
+
+    window.fetch = realFetch;
+    return { el, settles, resolved, isStreaming, mutatedAfterSettle,
+             answer: el.querySelector('.final-answer-content'),
+             notes: [...el.querySelectorAll('.stream-note')].map(n => n.textContent),
+             errors: el.querySelectorAll('.error-text'),
+             chipStatus: (callId) => {
+                 const chip = el.querySelector(`.tool-chip[data-call-id="${callId}"] .tool-result`);
+                 return chip ? chip.textContent : null;
+             } };
+}
+
+function baseAsserts(name, r, reason) {
+    const problems = [];
+    if (r.settles.length !== 1) problems.push(`settle x${r.settles.length}`);
+    else if (r.settles[0].reason !== reason) problems.push(`reason=${r.settles[0].reason}, want ${reason}`);
+    if (r.resolved !== r.settles[0]) problems.push('promise result !== settle payload');
+    if (r.isStreaming) problems.push('streaming flag not cleared');
+    if (r.mutatedAfterSettle) problems.push('DOM mutated after settlement');
+    if (r.el.classList.contains('streaming')) problems.push('streaming class remains');
+    return problems;
+}
+
+function record(name, problems) {
+    results.push({ name, ok: problems.length === 0, detail: problems.join('; ') });
+}
+
+async function main() {
+    // Row 1: final -> done -> [DONE]
+    {
+        const r = await run([ev({type: 'token', content: '**bo'}), ev({type: 'token', content: 'ld**'}),
+                             ev({type: 'final', content: '**bold**'}), ev({done: true}), 'data: [DONE]\n\n']);
+        const p = baseAsserts('row1', r, 'complete');
+        if (!r.answer.querySelector('strong')) p.push('final not markdown-rendered');
+        if (!r.settles[0].receivedFinal) p.push('receivedFinal false');
+        if (r.notes.length) p.push('unexpected note');
+        record('1. final -> done: complete, one rendered final', p);
+    }
+    // Row 2: final -> EOF (no done marker)
+    {
+        const r = await run([ev({type: 'final', content: 'answer *x*'})]);
+        const p = baseAsserts('row2', r, 'complete');
+        if (!r.answer.querySelector('em')) p.push('final not rendered');
+        record('2. final -> EOF: complete', p);
+    }
+    // Row 3: tokens -> EOF, no final
+    {
+        const r = await run([ev({type: 'token', content: '# Head'}), ev({type: 'token', content: 'ing text'})]);
+        const p = baseAsserts('row3', r, 'incomplete');
+        if (!r.answer.querySelector('h1')) p.push('pending source not final-rendered as markdown');
+        if (!r.notes.some(n => n.includes('may be incomplete'))) p.push('missing incomplete note');
+        record('3. token-only EOF: incomplete + note + rendered pending', p);
+    }
+    // Row 4: done marker without final
+    {
+        const r = await run([ev({type: 'token', content: 'partial'}), ev({done: true}), 'data: [DONE]\n\n']);
+        const p = baseAsserts('row4', r, 'incomplete');
+        if (!r.notes.some(n => n.includes('may be incomplete'))) p.push('missing incomplete note');
+        record('4. done without final: incomplete', p);
+    }
+    // Row 5: malformed line, then final + done
+    {
+        const r = await run(['data: {broken json\n\n', ev({type: 'final', content: 'ok'}), ev({done: true})]);
+        const p = baseAsserts('row5', r, 'complete');
+        if (r.settles[0].malformedCount !== 1) p.push(`malformedCount=${r.settles[0].malformedCount}`);
+        if (!r.notes.some(n => n.includes('could not be read'))) p.push('missing malformed note');
+        record('5. malformed line -> complete with warning note', p);
+    }
+    // Row 6: backend error event (followed by [DONE])
+    {
+        const r = await run([ev({type: 'token', content: 'part'}),
+                             ev({type: 'error', message: 'model exploded'}), 'data: [DONE]\n\n']);
+        const p = baseAsserts('row6', r, 'error');
+        if (r.settles[0].errorMessage !== 'model exploded') p.push(`errorMessage=${r.settles[0].errorMessage}`);
+        if (r.errors.length !== 1) p.push(`error rendered x${r.errors.length}`);
+        if (!r.errors[0].textContent.includes('model exploded')) p.push('specific message lost');
+        if (!r.answer.textContent.includes('part')) p.push('pending source not rendered');
+        record('6. backend error: one specific error, pending rendered', p);
+    }
+    // Row 7: fetch rejection
+    {
+        const r = await run([], { reject: 'network down' });
+        const p = baseAsserts('row7', r, 'error');
+        if (r.settles[0].errorMessage !== 'network down') p.push(`errorMessage=${r.settles[0].errorMessage}`);
+        if (r.errors.length !== 1) p.push(`error rendered x${r.errors.length}`);
+        record('7. fetch rejection: error with transport message', p);
+    }
+    // Row 8: abort before final
+    {
+        const r = await run([ev({type: 'token', content: 'so far *good*'}), 'HOLD'], { abortAfterMs: 60 });
+        const p = baseAsserts('row8', r, 'aborted');
+        if (!r.answer.querySelector('em')) p.push('pending source not rendered');
+        if (!r.notes.some(n => n.includes('Stopped'))) p.push('missing Stopped note');
+        record('8. abort before final: aborted + Stopped + rendered pending', p);
+    }
+    // Row 9: abort after final
+    {
+        const r = await run([ev({type: 'final', content: 'done deal'}), 'HOLD'], { abortAfterMs: 60 });
+        const p = baseAsserts('row9', r, 'complete');
+        if (!r.answer.textContent.includes('done deal')) p.push('final content lost');
+        if (r.notes.length) p.push('unexpected note after complete');
+        record('9. abort after final: complete, answer kept', p);
+    }
+    // Row 10: stray render events after final (token, thinking, tool_call)
+    {
+        const r = await run([ev({type: 'final', content: 'authoritative'}),
+                             ev({type: 'token', content: 'STRAY'}),
+                             ev({type: 'thinking', content: 'STRAYTHINK'}),
+                             ev({type: 'tool_call', call_id: 9, name: 'x', arguments: {}}),
+                             ev({done: true})]);
+        const p = baseAsserts('row10', r, 'complete');
+        if (r.answer.textContent.includes('STRAY')) p.push('post-final token mutated answer');
+        if (r.el.textContent.includes('STRAYTHINK')) p.push('post-final thinking rendered');
+        if (r.chipStatus(9) !== null) p.push('post-final tool_call created a chip');
+        record('10. post-final token/thinking/tool_call ignored', p);
+    }
+    // Row 11: reader.read() rejection mid-stream (transport error, not abort)
+    {
+        const r = await run([ev({type: 'token', content: 'partial'}), 'BREAK']);
+        const p = baseAsserts('row11', r, 'error');
+        if (r.settles[0].errorMessage !== 'connection reset') p.push(`errorMessage=${r.settles[0].errorMessage}`);
+        if (r.errors.length !== 1) p.push(`error rendered x${r.errors.length}`);
+        record('11. reader rejection: error with transport message', p);
+    }
+
+    // Unmatched running chips must terminalize on every settle reason
+    const chipCall = ev({type: 'tool_call', call_id: 1, name: 'slowTool', arguments: {}});
+    {
+        const r = await run([chipCall]); // EOF, no result, no final
+        const p = baseAsserts('c1', r, 'incomplete');
+        if (r.chipStatus(1) !== 'interrupted') p.push(`chip=${r.chipStatus(1)}`);
+        record('C1. unmatched chip at EOF: interrupted', p);
+    }
+    {
+        const r = await run([chipCall, ev({type: 'error', message: 'boom'})]);
+        const p = baseAsserts('c2', r, 'error');
+        if (r.chipStatus(1) !== 'interrupted') p.push(`chip=${r.chipStatus(1)}`);
+        record('C2. unmatched chip on error: interrupted', p);
+    }
+    {
+        const r = await run([chipCall, ev({type: 'final', content: 'done anyway'}), ev({done: true})]);
+        const p = baseAsserts('c3', r, 'complete');
+        if (r.chipStatus(1) !== 'unknown') p.push(`chip=${r.chipStatus(1)}`);
+        record('C3. unmatched chip on complete (lost result): unknown', p);
+    }
+    {
+        const r = await run([chipCall, 'HOLD'], { abortAfterMs: 60 });
+        const p = baseAsserts('c4', r, 'aborted');
+        if (r.chipStatus(1) !== 'stopped') p.push(`chip=${r.chipStatus(1)}`);
+        record('C4. unmatched chip on abort: stopped', p);
+    }
+    // Matched chip: result replaces running status
+    {
+        const r = await run([chipCall,
+                             ev({type: 'tool_result', call_id: 1, name: 'slowTool', success: true}),
+                             ev({type: 'final', content: 'ok'}), ev({done: true})]);
+        const p = baseAsserts('c5', r, 'complete');
+        if (r.chipStatus(1) !== 'done') p.push(`chip=${r.chipStatus(1)}`);
+        record('C5. matched chip: running replaced by done', p);
+    }
+
+    // Boundary: multibyte char split across chunks (split verified to land
+    // inside the 3-byte encoding of '✓')
+    {
+        const line = ev({type: 'final', content: 'café ✓'});
+        const bytes = enc.encode(line);
+        const mid = enc.encode(line.slice(0, line.indexOf('✓'))).length + 1;
+        if (bytes[mid - 1] !== 0xE2) throw new Error('multibyte split offset wrong');
+        const r = await run([bytes.slice(0, mid), bytes.slice(mid)]);
+        const p = baseAsserts('b1', r, 'complete');
+        if (!r.answer.textContent.includes('café ✓')) p.push('multibyte content corrupted: ' + r.answer.textContent);
+        if (r.settles[0].malformedCount) p.push('spurious malformed count');
+        record('B1. multibyte char split across chunks', p);
+    }
+    // Boundary: JSON split across chunks
+    {
+        const line = ev({type: 'final', content: 'split json content'});
+        const r = await run([line.slice(0, 20), line.slice(20)]);
+        const p = baseAsserts('b2', r, 'complete');
+        if (!r.answer.textContent.includes('split json content')) p.push('content lost');
+        record('B2. JSON split across chunks', p);
+    }
+    // Boundary: "data: " prefix split across chunks
+    {
+        const line = ev({type: 'final', content: 'prefix split'});
+        const r = await run([line.slice(0, 3), line.slice(3)]);
+        const p = baseAsserts('b3', r, 'complete');
+        if (!r.answer.textContent.includes('prefix split')) p.push('content lost');
+        record('B3. data: prefix split across chunks', p);
+    }
+    // Boundary: final event buffered with no trailing newline at EOF
+    {
+        const line = `data: ${JSON.stringify({type: 'final', content: 'no trailing newline'})}`;
+        const r = await run([ev({type: 'token', content: 'x'}), line]);
+        const p = baseAsserts('b4', r, 'complete');
+        if (!r.answer.textContent.includes('no trailing newline')) p.push('buffered final lost');
+        record('B4. EOF without trailing newline still processes buffered final', p);
+    }
+    // Boundary: final event truncated at EOF
+    {
+        const line = ev({type: 'final', content: 'this gets cut off'});
+        const r = await run([line.slice(0, line.length - 15)]);
+        const p = baseAsserts('b5', r, 'incomplete');
+        if (r.settles[0].malformedCount !== 1) p.push(`malformedCount=${r.settles[0].malformedCount}`);
+        record('B5. truncated final at EOF: incomplete + malformed counted', p);
+    }
+
+    // Report
+    const ul = document.getElementById('results');
+    let passed = 0;
+    for (const r of results) {
+        const li = document.createElement('li');
+        li.className = r.ok ? 'pass' : 'fail';
+        li.textContent = (r.ok ? 'PASS ' : 'FAIL ') + r.name + (r.detail ? ' -- ' + r.detail : '');
+        ul.appendChild(li);
+        if (r.ok) passed++;
+    }
+    const summary = document.getElementById('summary');
+    summary.textContent = `${passed}/${results.length} passed`;
+    summary.className = passed === results.length ? 'pass' : 'fail';
+    document.title = (passed === results.length ? 'PASS ' : 'FAIL ') + 'Terminal matrix harness';
+}
+main();
+</script>
+</body>
+</html>
